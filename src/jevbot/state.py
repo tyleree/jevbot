@@ -270,7 +270,7 @@ class StateBuilder:
                 "news": dict(lists),
             },
         )
-        state = self._trim_to_max_chars(state, lists, "news")
+        state, stats = self._trim_to_max_chars(state, lists, "news", stats)
         facts = msgspec.structs.replace(base.facts, news_enabled=True, news_count=stats.kept, news_recent_count=stats.kept_recent)
         return self._finish(state, view, underlying, facts, ref=base.facts.spot, source=base.provenance, stats=stats)
 
@@ -341,7 +341,7 @@ class StateBuilder:
         if not stats.kept:
             return None
         state = _append_after_events(base.state, vocab.STATE_SCHEMA["manage_text"], {"news_since_entry": dict(lists)})
-        state = self._trim_to_max_chars(state, lists, "news_since_entry")
+        state, stats = self._trim_to_max_chars(state, lists, "news_since_entry", stats)
         facts = msgspec.structs.replace(base.facts, news_count=stats.kept, news_recent_count=stats.kept_recent)
         return self._finish(state, view, underlying, facts, ref=_identity_ref(base), source=base.provenance, stats=stats)
 
@@ -465,13 +465,27 @@ class StateBuilder:
             items = tuple(item for item in items if item.created_at >= since)
         return textmask.prepare_news(items, view.as_of, self._cutoff(view), self.cfg.news, self.mask_terms, self.cfg.universe.underlyings)
 
-    def _trim_to_max_chars(self, state: dict[str, Any], lists: Mapping[str, list[dict[str, Any]]], key: str) -> dict[str, Any]:
-        """5.8 step 6: after the block fits `news.max_total_chars`, drop oldest until the WHOLE state fits `state.max_chars`."""
+    def _trim_to_max_chars(
+        self, state: dict[str, Any], lists: Mapping[str, list[dict[str, Any]]], key: str, stats: textmask.NewsStats
+    ) -> tuple[dict[str, Any], textmask.NewsStats]:
+        """5.8 step 6: after the block fits `news.max_total_chars`, drop oldest until the WHOLE state fits `state.max_chars`.
+
+        The counters follow the trim: `NewsStats.ids` is newest first, so the items that survive are its first `kept`.
+        """
         while len(dumps_ordered(state)) > self.cfg.state.max_chars and textmask.drop_oldest(lists):
-            state[key] = dict(lists)
+            state[key] = _copy(dict(lists))
             if "news_status" in state:
                 state["news_status"] = "present" if (lists[textmask.RECENT_KEY] or lists[textmask.EARLIER_KEY]) else "none_in_window"
-        return state
+        kept = len(lists[textmask.RECENT_KEY]) + len(lists[textmask.EARLIER_KEY])
+        if kept != stats.kept:
+            stats = msgspec.structs.replace(
+                stats,
+                kept=kept,
+                kept_recent=len(lists[textmask.RECENT_KEY]),
+                dropped=stats.dropped + (stats.kept - kept),
+                ids=stats.ids[:kept],
+            )
+        return state, stats
 
     # --- assembly -----------------------------------------------------------------------------------------------------
 
