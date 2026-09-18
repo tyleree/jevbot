@@ -82,7 +82,9 @@ def test_the_trend_rule_returns_one_of_its_four_labels_for_any_positive_inputs()
 def test_the_pnl_bucket_is_monotone_in_the_profit_and_in_the_loss() -> None:
     gain_base, loss_base = 6000, 14000
     gains = [buckets.pnl_bucket(pnl_mid=value, gain_base=gain_base, loss_base=loss_base, long_premium=False) for value in range(0, 6000, 7)]
-    losses = [buckets.pnl_bucket(pnl_mid=-value, gain_base=gain_base, loss_base=loss_base, long_premium=False) for value in range(0, 14000, 13)]
+    losses = [
+        buckets.pnl_bucket(pnl_mid=-value, gain_base=gain_base, loss_base=loss_base, long_premium=False) for value in range(0, 14000, 13)
+    ]
     gain_order = [buckets.PNL_GAIN.labels.index(label) for label in gains]
     loss_order = [buckets.PNL_LOSS.labels.index(label) for label in losses]
     assert gain_order == sorted(gain_order) and loss_order == sorted(loss_order)

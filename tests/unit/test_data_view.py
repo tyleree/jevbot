@@ -535,7 +535,7 @@ def test_a_provider_without_the_partition_hook_still_works() -> None:
     )
     assert view.chain("SPY").content_hash == chain.content_hash
     assert view.opened_partitions() == ()
-    assert view.touched()[0].source == "synthetic.chain"
+    assert view.touched()[0].source == f"{chain.source}.chain"  # the SNAPSHOT's source, not the provider's
 
 
 def test_a_gap_in_the_previous_close_gives_no_open_ratio() -> None:

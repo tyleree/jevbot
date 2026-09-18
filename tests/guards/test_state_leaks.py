@@ -20,12 +20,13 @@ import pytest
 from jevbot import vocab
 from jevbot.canon import ensure_state_safe
 from jevbot.config import Config, StateConfig, load_mask_terms
+from jevbot.errors import StateError
 from jevbot.state import StateBuilder
 from jevbot.types import (
     BandPrices,
-    Fidelity,
     BuiltState,
     EntryContext,
+    Fidelity,
     Leg,
     MaskTerms,
     NewsItem,
@@ -141,9 +142,7 @@ def _position(view: FakeView, index: int) -> Position:
             Leg(contract=contract(Right.CALL, short_call + 2 * step), side=Side.BUY),
         )
         open_mid = -int(rng.integers(20, 150))
-    structure = Structure(
-        kind=kind, underlying="SPY", expiry=expiry, last_session=chain.last_session(expiry), legs=legs
-    )
+    structure = Structure(kind=kind, underlying="SPY", expiry=expiry, last_session=chain.last_session(expiry), legs=legs)
     held = int(rng.integers(0, 25))
     entry = EntryContext(
         entry_thesis="opened with trend mixed, implied volatility iv_fair versus realized, iv rank middle, "
@@ -264,7 +263,7 @@ def test_the_unmasked_diagnostic_is_the_only_way_an_identifier_reaches_a_state(t
     built = StateBuilder(cfg, terms, news_resolved=True).entry(view, "SPY")
     assert built is not None and "identity" in built.state
     ensure_state_safe(built.state, masked=False, underlyings=UNDERLYINGS)
-    with pytest.raises(Exception, match="leak|pattern|forbidden"):
+    with pytest.raises(StateError):
         ensure_state_safe(built.state, masked=True, underlyings=UNDERLYINGS)
     assert Config().state.unmasked is False  # the shipped default
 

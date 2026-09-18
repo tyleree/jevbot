@@ -198,7 +198,7 @@ def open_intent(*, qty: int = 2, session: date = SESSION, structure: Structure =
             for leg in structure.legs
         ),
         qty=qty,
-        limit_start=-250,
+        limit_start=-246,  # AT the natural: the FakeBroker fills only a marketable limit (15.4)
         limit_natural=-246,
         reason="entry",
         mandatory=False,
@@ -312,11 +312,13 @@ def test_the_submit_protocol_writes_submitting_before_the_broker_call_then_the_r
     ledger_intent(w, intent)
     order = approve(w, intent)
     state = reconcile.submit_approved(w.ledger, w.book, w.broker, order, CLOSE)
-    assert state is not None and state.status is OrderStatus.FILLED
+    assert state is not None and state.status is OrderStatus.SUBMITTED
     assert w.statuses() == [
         (order.client_order_id, "submitting", ""),
-        (order.client_order_id, "filled", ""),
+        (order.client_order_id, "submitted", ""),
     ]
+    assert w.ingest() == 1
+    assert w.statuses()[-1] == (order.client_order_id, "filled", "")
     # SUBMITTING is durable BEFORE the broker call: it is the earlier ledger seq
     submitting = next(e for e in w.ledger.entries(LedgerKind.ORDER_STATUS))
     assert submitting.payload["status"] == "submitting" and submitting.payload["limit"] == order.limit
@@ -339,6 +341,7 @@ def test_a_definitive_rejection_and_an_ambiguous_call_leave_their_own_trail() ->
     # the order WAS accepted: the next ingest resolves it (9.6)
     assert w.ingest() == 1
     assert [s[1] for s in w.statuses() if s[0] == retry.client_order_id] == ["submitting", "unknown", "filled"]
+    assert len(w.kinds(LedgerKind.FILL)) == 1
 
 
 def test_the_same_trail_comes_out_of_a_second_broker_that_follows_the_protocol() -> None:
@@ -396,18 +399,23 @@ def test_one_cumulative_fill_offered_three_times_is_booked_once() -> None:
 
 
 def test_a_partial_then_a_full_fill_book_two_deltas() -> None:
+    """mleg fills are unit-atomic (15.4): each poll books a whole-contract delta, and the Book grows with it."""
     w = world(seed=3, partial_rate=1.0)
-    intent = open_intent(qty=4)
-    ledger_intent(w, intent)
+    intent = open_intent(qty=2)
     order = approve(w, intent)
+    ledger_intent(w, intent)
     reconcile.submit_approved(w.ledger, w.book, w.broker, order, CLOSE)
     assert w.ingest() == 1
-    assert w.book.state().positions[0].qty == 2 and w.book.filled_qty(order.client_order_id) == 2
-    w.broker.force_fill()
+    assert w.book.state().positions[0].qty == 1 and w.book.filled_qty(order.client_order_id) == 1
     assert w.ingest() == 1
-    assert w.book.state().positions[0].qty == 4
-    assert [f["qty"] for f in w.kinds(LedgerKind.FILL)] == [2, 2]
-    assert [s[1] for s in w.statuses()] == ["submitting", "partially_filled", "filled"]
+    assert w.book.state().positions[0].qty == 2 and w.book.filled_qty(order.client_order_id) == 2
+    assert [f["qty"] for f in w.kinds(LedgerKind.FILL)] == [1, 1]
+    assert [f["fill_id"] for f in w.kinds(LedgerKind.FILL)] == [
+        ids.fill_id(order.client_order_id, 1),
+        ids.fill_id(order.client_order_id, 2),
+    ]
+    assert [s[1] for s in w.statuses()] == ["submitting", "submitted", "partially_filled", "filled"]
+    assert w.ingest() == 0
 
 
 def test_a_closing_fill_carries_the_realised_pnl_per_band() -> None:
@@ -430,7 +438,7 @@ def test_a_closing_fill_carries_the_realised_pnl_per_band() -> None:
             )
             for leg in SPREAD.legs
         ),
-        limit_start=260,
+        limit_start=254,  # closing natural: buy the short back at 404, sell the long at 150
         limit_natural=254,
         entry_ctx=None,
         reason="profit_target",

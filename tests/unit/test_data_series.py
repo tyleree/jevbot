@@ -193,9 +193,15 @@ def test_a_composite_session_slot_key_accepts_dates_timestamps_and_slots(cal: Xn
     assert int(row["px_c"]) == 45_000
     assert table.row((pd.Timestamp(SESSIONS[1]), "eod"), as_of).equals(row)
     assert table.row((datetime(2024, 5, 16, tzinfo=UTC).date(), Slot.EOD.value), as_of).equals(row)
+    assert table.row((np.datetime64(SESSIONS[1], "ns"), Slot.EOD), as_of).equals(row)  # a numpy date is the same key
     assert table.has((SESSIONS[0], Slot.DEC)) and not table.has((SESSIONS[0], Slot.EXEC))
     assert table.value((SESSIONS[0], Slot.EOD), "close_c", as_of) == 45_000
-    assert isinstance(table.value((SESSIONS[0], Slot.EOD), "close_c", as_of), int)
+    # the cells come back as PLAIN PYTHON objects: integer cents, tz-aware datetimes - never numpy or pandas scalars
+    close = table.value((SESSIONS[0], Slot.EOD), "close_c", as_of)
+    assert isinstance(close, int) and type(close) is int
+    stamp = table.value((SESSIONS[0], Slot.EOD), "close_knowable_at", as_of)
+    assert isinstance(stamp, datetime) and stamp == closes(cal, SESSIONS[0]) and stamp.tzinfo is not None
+    assert type(table.value((SESSIONS[0], Slot.EOD), "px_c", as_of)) is int
 
 
 def test_close_c_is_gated_by_its_own_timestamp_and_only_exists_on_eod_rows(cal: XnysCalendar) -> None:
@@ -322,6 +328,9 @@ def test_news_coverage_separates_no_archive_from_no_news() -> None:
     assert source.covered("QQQ", date(2024, 5, 9)) and not source.covered("QQQ", date(2024, 5, 17))
     assert not source.covered("IWM", date(2024, 5, 9))
     assert len(source) == 5 and source.coverage()[0][0] == "SPY"
+    empty = TableNewsSource(pd.DataFrame(columns=["id", "created_at", "updated_at", "knowable_at", "headline", "source", "symbols"]))
+    assert len(empty) == 0 and empty.coverage() == () and not empty.covered("SPY", date(2024, 5, 17))
+    assert empty.items("SPY", datetime(2024, 5, 17, 20, 0, tzinfo=UTC), 24) == ()  # covered by nothing, but not an error
 
 
 def test_a_news_frame_is_read_like_the_archive_parquet() -> None:
@@ -475,6 +484,15 @@ def test_an_events_frame_is_read_like_the_events_csv() -> None:
         TableEventSource(frame.drop(columns=["knowable_rule"]))
     with pytest.raises(DataError, match="must be a boolean"):
         TableEventSource(frame.assign(scheduled=["maybe", "true"]))
+    # parquet round trips booleans as bool / 0-1 and a missing `cancelled` column defaults to False
+    numeric = TableEventSource(frame.assign(scheduled=[1, 0], cancelled=[0.0, 0.0]))
+    assert [e.scheduled for e in numeric.all_events()] == [True, False]
+    assert [e.cancelled for e in numeric.all_events()] == [False, False]
+    assert [e.cancelled for e in TableEventSource(frame.drop(columns=["cancelled"])).all_events()] == [False, False]
+    with pytest.raises(DataError, match="event_date must be a date"):
+        TableEventSource(frame.assign(event_date=[None, "2015-06-19"]))
+    with pytest.raises(DataError, match="knowable_at must be a timestamp"):
+        TableEventSource(frame.assign(knowable_at=[None, "2015-06-05T00:00:00Z"]))
 
 
 def test_event_reads_need_a_tz_aware_as_of() -> None:

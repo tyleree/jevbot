@@ -8,9 +8,11 @@ What it models (15.4):
 
 * orders keyed by `client_order_id`; a duplicate id returns the EXISTING order (idempotent submit, D18), unless
   `duplicate_accepted_twice=True` - the switch that lets a test exercise deviation V4's assumption;
-* a fill happens only when the order's limit is **marketable** against the quote tape (G2): the natural (worst-band) price of
-  the order's legs is `sum(ask of the legs we buy) - sum(bid of the legs we sell)` and a limit is marketable when it is at
-  least that (a market order always is). Nothing fills on a quote the tape does not carry;
+* `submit()` ACCEPTS an order (status `submitted`); it trades on the next poll, like a real broker - so the ledger trail is
+  always `submitting -> submitted -> (partially_)filled` and `ingest_fills` is the only thing that turns a fill into a FILL
+  entry (9.6). A fill happens only when the order's limit is **marketable** against the quote tape (G2): the natural
+  (worst-band) price of its legs is `sum(ask of the legs we buy) - sum(bid of the legs we sell)` and a limit is marketable
+  when it is at least that (a market order always is). Nothing fills on a quote the tape does not carry;
 * mleg fills are unit-atomic (whole contracts across every leg); a seeded `partial_rate` fills part of the quantity first;
 * positions are signed per OCC symbol and may include an injected EQUITY position (an assignment);
 * `activities()` reports OPASN / OPEXP for the NEXT day, as the real one does;
@@ -188,6 +190,7 @@ class FakeBroker:
 
     def positions(self) -> tuple[BrokerPosition, ...]:
         self.calls.append("positions")
+        self._poll()
         return tuple(
             BrokerPosition(symbol=symbol, qty=qty, is_option=_is_option(symbol))
             for symbol, qty in sorted(self.positions_by_symbol.items())
@@ -196,6 +199,7 @@ class FakeBroker:
 
     def open_orders(self) -> tuple[OrderState, ...]:
         self.calls.append("open_orders")
+        self._poll()
         return tuple(
             record.state for _, record in sorted(self._orders.items()) if record.visible and record.state.status not in TERMINAL_STATUSES
         )
@@ -226,6 +230,7 @@ class FakeBroker:
         if not record.visible:
             record.visible = True  # a late POST: this lookup is the first that sees it
             return None
+        self._poll()
         return record.state
 
     def cancel(self, client_order_id: str) -> OrderState:
@@ -274,9 +279,13 @@ class FakeBroker:
             updated_at=self.now,
         )
         self._orders[order.client_order_id] = _Order(state=state, order=order, visible=visible)
-        if visible:
-            self._maybe_fill(order.client_order_id)
-        return self._orders[order.client_order_id].state
+        return state  # accepted, not yet traded: the next poll decides (9.6)
+
+    def _poll(self) -> None:
+        """What a real broker does between calls: every resting, marketable order trades."""
+        for cid, record in list(self._orders.items()):
+            if record.visible and record.state.status not in TERMINAL_STATUSES:
+                self._maybe_fill(cid)
 
     def _maybe_fill(self, client_order_id: str) -> None:
         record = self._orders[client_order_id]

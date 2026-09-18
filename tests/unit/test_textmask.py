@@ -37,8 +37,26 @@ UNDERLYINGS: Final = ("SPY", "QQQ", "IWM")
 MASK_TERMS_FILE: Final = Path(__file__).resolve().parents[2] / "config" / "mask_terms.toml"
 # distinct, digit-free words: the de-duplication of 5.8 step 6 keys on the MASKED headline
 _WORDS: Final[tuple[str, ...]] = (
-    "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet",
-    "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo", "sierra", "tango",
+    "alpha",
+    "bravo",
+    "charlie",
+    "delta",
+    "echo",
+    "foxtrot",
+    "golf",
+    "hotel",
+    "india",
+    "juliet",
+    "kilo",
+    "lima",
+    "mike",
+    "november",
+    "oscar",
+    "papa",
+    "quebec",
+    "romeo",
+    "sierra",
+    "tango",
 )
 
 
@@ -113,7 +131,7 @@ def test_markup_characters_become_spaces_so_text_cannot_imitate_a_state_path() -
 
 
 def test_quotes_are_straightened_and_whitespace_collapsed() -> None:
-    assert sanitize("“Steady” ‘for now’   says one", max_chars=200) == '"Steady" \'for now\' says one'
+    assert sanitize("“Steady” ‘for now’   says one", max_chars=200) == "\"Steady\" 'for now' says one"
 
 
 def test_truncation_happens_at_a_word_boundary() -> None:
@@ -343,7 +361,9 @@ def test_the_item_cap_applies_across_both_lists_and_keeps_the_newest(terms: Mask
 
 
 def test_the_block_is_trimmed_oldest_first_to_max_total_chars(terms: MaskTerms) -> None:
-    items = [_item(f"t{index:02d}", f"{_WORDS[index]} sector note lands with a long tail of words", hours_old=index + 1) for index in range(8)]
+    items = [
+        _item(f"t{index:02d}", f"{_WORDS[index]} sector note lands with a long tail of words", hours_old=index + 1) for index in range(8)
+    ]
     full, _ = prepare_news(items, AS_OF, CUTOFF, _cfg(), terms, UNDERLYINGS)
     budget = len(dumps_ordered(full)) // 2
     trimmed, stats = prepare_news(items, AS_OF, CUTOFF, _cfg(max_total_chars=budget), terms, UNDERLYINGS)

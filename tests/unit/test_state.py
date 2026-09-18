@@ -7,7 +7,7 @@ property the spec names: key order, path set, purity, text isolation, path indep
 
 import json
 import math
-from datetime import UTC, date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -28,8 +28,6 @@ from jevbot.state import (
 )
 from jevbot.types import (
     BandPrices,
-    BuiltState,
-    Cents,
     EntryContext,
     EntryFacts,
     Fidelity,
@@ -59,8 +57,7 @@ ENTRY_SPOT: Final = 44_500
 ENTRY_IV30_BP: Final = 1_800
 ENTRY_EM_TENTHS: Final = 42
 ENTRY_THESIS: Final = (
-    "opened with trend up, implied volatility iv_rich versus realized, iv rank upper_middle, "
-    "no tracked event inside the holding window"
+    "opened with trend up, implied volatility iv_rich versus realized, iv rank upper_middle, no tracked event inside the holding window"
 )
 
 
@@ -122,7 +119,9 @@ def _structure(view: FakeView, kind: StructureKind = StructureKind.PUT_CREDIT) -
         short_put = int(put_side.iloc[(put_side["delta"].abs() - 0.16).abs().argmin()]["strike_milli"])
         short_call = int(call_side.iloc[(call_side["delta"].abs() - 0.16).abs().argmin()]["strike_milli"])
         legs = (
-            Leg(contract=OptionContract(underlying="SPY", expiry=expiry, right=Right.PUT, strike_milli=short_put - 2 * step), side=Side.BUY),
+            Leg(
+                contract=OptionContract(underlying="SPY", expiry=expiry, right=Right.PUT, strike_milli=short_put - 2 * step), side=Side.BUY
+            ),
             Leg(contract=OptionContract(underlying="SPY", expiry=expiry, right=Right.PUT, strike_milli=short_put), side=Side.SELL),
             Leg(contract=OptionContract(underlying="SPY", expiry=expiry, right=Right.CALL, strike_milli=short_call), side=Side.SELL),
             Leg(
@@ -385,7 +384,7 @@ def test_entry_facts_carry_the_entry_context_raw_material(builder: StateBuilder,
     assert facts.spot == world.spot("SPY")
     surface = built.state["vol_surface"]
     assert facts.em_hold_tenths == surface["expected_move_holding_window"]["value"]
-    assert facts.iv30_bp == int(round(world.daily("SPY", 1)["iv30_bp"].iloc[-1]))
+    assert facts.iv30_bp == round(world.daily("SPY", 1)["iv30_bp"].iloc[-1])
     assert facts.events_in_window == len(built.state["events"]["inside_holding_window"])
     assert facts.trend_code == vocab.bucket_code(built.state["underlying"]["trend"]["direction"])
     assert facts.iv_rank_code == vocab.bucket_code(surface["iv_rank_1y"]["bucket"])
@@ -474,9 +473,7 @@ def test_the_pnl_bucket_is_mid_to_mid_and_uses_the_structmath_formulas(builder: 
     gain_base = structmath.max_profit_pc(position.structure.kind, widths, OPEN_MID)
     pnl_mid = (-OPEN_MID - 95) * 100
     assert gain_base == -OPEN_MID * 100 and loss_base == (widths[0] + OPEN_MID) * 100
-    assert state["position"]["pnl"] == buckets.pnl_bucket(
-        pnl_mid=pnl_mid, gain_base=gain_base, loss_base=loss_base, long_premium=False
-    )
+    assert state["position"]["pnl"] == buckets.pnl_bucket(pnl_mid=pnl_mid, gain_base=gain_base, loss_base=loss_base, long_premium=False)
     assert vocab.bucket_code(state["position"]["pnl"]) == "small_gain"  # 2500 of 12000 cents
 
 
@@ -524,7 +521,7 @@ def test_changes_since_entry_carry_bare_codes(builder: StateBuilder, world: Fake
     for key in ("trend_at_entry", "trend_now", "iv_vs_realized_at_entry", "iv_vs_realized_now"):
         assert ":" not in changes[key] and changes[key] in vocab.ALL_BUCKET_CODES
     assert changes["trend_at_entry"] == "up" and changes["iv_vs_realized_at_entry"] == "iv_rich"
-    iv30_bp = int(round(world.daily("SPY", 1)["iv30_bp"].iloc[-1]))
+    iv30_bp = round(world.daily("SPY", 1)["iv30_bp"].iloc[-1])
     assert changes["iv_change_since_entry"] == buckets.bucketize(iv30_bp / ENTRY_IV30_BP - 1.0, buckets.CHANGE5)
 
 

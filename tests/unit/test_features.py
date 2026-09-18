@@ -60,9 +60,7 @@ def _atm_term(calendar: XnysCalendar, as_of: datetime, session: date, horizons: 
     nodes: list[list[float]] = []
     for horizon in horizons:
         close = calendar.open_close(calendar.next_session(session, horizon))[1]
-        nodes.append(
-            [year_fraction(as_of, close), trading_time(calendar, as_of, close), ATM_IV_BP, ATM_IV_BP, REF]
-        )
+        nodes.append([year_fraction(as_of, close), trading_time(calendar, as_of, close), ATM_IV_BP, ATM_IV_BP, REF])
     return nodes
 
 
@@ -417,7 +415,7 @@ def test_em_1_friday_to_tuesday_ratio_stays_under_1_20_on_a_calendar_flat_fixtur
 
 def test_atm_term_parsing_rejects_a_malformed_payload() -> None:
     assert parse_atm_term(None) == () and parse_atm_term("") == () and parse_atm_term(float("nan")) == ()
-    assert parse_atm_term('[[0.1, 25.0, 1600, 1600, 45173]]') == ((0.1, 25.0, 1600, 1600, 45173),)
+    assert parse_atm_term("[[0.1, 25.0, 1600, 1600, 45173]]") == ((0.1, 25.0, 1600, 1600, 45173),)
     with pytest.raises(InvariantError):
         parse_atm_term("not json")
     with pytest.raises(InvariantError):
