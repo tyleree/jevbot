@@ -673,6 +673,8 @@ class CandidateGenerator:
             max_loss_per_contract=max_loss,
             max_profit_per_contract=structmath.max_profit_pc(kind, widths, net.get(self._headline)),
             bp_required_per_contract=structmath.bp_required_pc(kind, widths, net.worst, fee_rt, cfg.risk),
+            # the 9.2 breakeven column names no band; the WORST (natural) one is taken, like max loss and buying power, so
+            # the level we must clear is never flattered by the ORATS interpolation
             breakevens=structmath.breakevens(kind, structure.legs, net.worst),
             short_distance_em=self._short_distance_em(structure, ctx),
             net_delta=sum(

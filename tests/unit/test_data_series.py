@@ -13,6 +13,8 @@ from jevbot.errors import DataError, DataUnavailable, PitViolation
 from jevbot.types import NewsItem, ScheduledEvent, Slot
 
 SESSIONS: list[date] = [date(2024, 5, 15), date(2024, 5, 16), date(2024, 5, 17)]
+# deliberately naive (built from a tz-aware instant so the DTZ lint stays on): every gated read must refuse it
+NAIVE: datetime = datetime(2024, 5, 17, 20, 0, tzinfo=UTC).replace(tzinfo=None)
 
 
 @pytest.fixture(scope="module")
@@ -257,7 +259,7 @@ def test_knowable_at_reports_the_effective_gate_without_checking_it(cal: XnysCal
 
 def test_asof_needs_a_tz_aware_instant(cal: XnysCalendar) -> None:
     table = bars_table(cal)
-    naive = datetime(2024, 5, 17, 20, 0)
+    naive = NAIVE
     for call in (lambda: table.asof(naive), lambda: table.row(SESSIONS[0], naive), lambda: table.value(SESSIONS[0], "open", naive)):
         with pytest.raises(ValueError, match="tz-aware"):
             call()
@@ -311,7 +313,7 @@ def test_news_is_newest_first_gated_and_loses_a_revised_summary() -> None:
     with pytest.raises(ValueError, match="lookback_hours"):
         source.items("SPY", as_of, -1)
     with pytest.raises(ValueError, match="tz-aware"):
-        source.items("SPY", datetime(2024, 5, 17, 18, 0), 24)
+        source.items("SPY", NAIVE, 24)
 
 
 def test_news_coverage_separates_no_archive_from_no_news() -> None:
@@ -351,7 +353,7 @@ def test_the_null_news_source_is_never_covered() -> None:
     assert source.items("SPY", datetime(2024, 5, 17, 20, 0, tzinfo=UTC), 24) == ()
     assert not source.covered("SPY", date(2024, 5, 17))
     with pytest.raises(ValueError, match="tz-aware"):
-        source.items("SPY", datetime(2024, 5, 17, 20, 0), 24)
+        source.items("SPY", NAIVE, 24)
 
 
 # ======================================================================================================================
@@ -477,4 +479,4 @@ def test_an_events_frame_is_read_like_the_events_csv() -> None:
 
 def test_event_reads_need_a_tz_aware_as_of() -> None:
     with pytest.raises(ValueError, match="tz-aware"):
-        event_source().events(datetime(2015, 6, 1), date(2015, 1, 1), date(2015, 12, 31))
+        event_source().events(NAIVE, date(2015, 1, 1), date(2015, 12, 31))

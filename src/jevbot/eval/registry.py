@@ -468,6 +468,11 @@ class Registry:
             self._conn.executescript(SCHEMA)
             self._conn.commit()
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """The open SQLite connection - for `doctor` and for tests that check the append-only triggers themselves."""
+        return self._conn
+
     @classmethod
     def open(cls, data_dir: Path, *, read_only: bool = False) -> "Registry":
         return cls(Path(data_dir) / REGISTRY_FILENAME, read_only=read_only)

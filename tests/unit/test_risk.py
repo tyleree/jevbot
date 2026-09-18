@@ -127,6 +127,7 @@ def narrow_put_credit(
 
 
 NARROW_CHAIN, NARROW = narrow_put_credit()
+OTHER = make_structure(make_chain("QQQ", spot=38_000), StructureKind.CALL_CREDIT)  # bearish QQQ: unrelated to NARROW
 NARROW_VIEW = view_of(NARROW_CHAIN)
 # hand-computed for NARROW: fee_rt = ceil((167,780 + 3,132 + 8,282) micro-dollars / 10,000) = 18c (10.7 round trip, mids 152 / 402)
 FEE_RT = 18
@@ -362,20 +363,28 @@ def test_check_1_an_open_is_refused_in_every_non_armed_kill_state(state: KillSta
     assert not check(verdict, "kill_active").passed
 
 
-def test_check_1_a_close_is_approved_under_a_kill_a_halt_a_rate_cap_and_a_stale_book() -> None:
+def test_check_1_a_close_is_approved_under_a_kill_a_halt_and_a_stale_book() -> None:
     """INV-21: no entry-side condition may block a risk-reducing close."""
     pf = portfolio(
         positions=(position_of(NARROW),),
         kill_state=KillState.NOT_FLAT,
         halt_entries=True,
         halt_reasons=("daily_loss_halt",),
-        orders_last_minute=99,
         stale_sessions=5,
+        jev_fail_sessions=9,
     )
-    verdict, order = approve(intent_of(NARROW, purpose=OrderPurpose.CLOSE, limit_start=250, limit_natural=246), pf=pf)
+    closing = intent_of(NARROW, purpose=OrderPurpose.CLOSE, limit_start=240, limit_natural=246)
+    verdict, order = approve(closing, pf=pf)
     assert order is not None and verdict.approved
     assert check(verdict, "kill_active").detail.startswith("n/a") and check(verdict, "halt_entries").detail.startswith("n/a")
-    assert check(verdict, "order_rate").passed
+    for code in ("structure_not_allowed", "dte_window", "event_blackout", "dup_underlying_direction", "max_new_per_day"):
+        assert check(verdict, code).detail.startswith("n/a"), code
+    # the order-rate cap of check 21 DOES apply to a discretionary close, and only a mandatory one is exempt (9.1)
+    busy = msgspec.structs.replace(pf, orders_last_minute=99)
+    verdict, order = approve(closing, pf=busy)
+    assert order is None and "risk:order_rate" in verdict.reject_codes
+    verdict, order = approve(msgspec.structs.replace(closing, mandatory=True), pf=busy)
+    assert order is not None and check(verdict, "order_rate").detail.startswith("n/a")
 
 
 def test_check_1_a_kill_order_is_refused_only_when_the_account_is_locked() -> None:
@@ -396,7 +405,7 @@ def test_check_1_and_2_an_entry_halt_and_a_diagnostic_run_stop_an_open_but_not_a
 
     diagnostic = engine(flags=("diagnostic",))
     pf = portfolio(positions=(position_of(NARROW),))
-    for purpose, limits in ((OrderPurpose.OPEN, (-250, -246)), (OrderPurpose.CLOSE, (250, 246))):
+    for purpose, limits in ((OrderPurpose.OPEN, (-250, -246)), (OrderPurpose.CLOSE, (240, 246))):
         verdict, order = approve(intent_of(NARROW, purpose=purpose, limit_start=limits[0], limit_natural=limits[1]), pf=pf, eng=diagnostic)
         assert order is None and "risk:diagnostic_run" in verdict.reject_codes
         assert check(verdict, "diagnostic_run").detail == "diagnostic"
@@ -426,19 +435,24 @@ def test_check_4_refuses_a_disabled_kind_and_legs_that_are_not_the_kinds_templat
     verdict, order = approve(intent_of(NARROW), cfg=cfg)
     assert order is None and not check(verdict, "structure_not_allowed").passed
 
-    two_legged_single = msgspec.structs.replace(NARROW, kind=StructureKind.LONG_PUT)
-    verdict, _ = approve(intent_of(two_legged_single))
-    assert not check(verdict, "structure_not_allowed").passed
+    mislabelled = msgspec.structs.replace(NARROW, underlying="QQQ")  # SPY legs under a QQQ structure
+    verdict, order = approve(intent_of(mislabelled))
+    assert order is None and not check(verdict, "structure_not_allowed").passed
+    assert check(verdict, "underlying_not_allowed").passed  # the LEGS still match the intent's underlying (check 3)
 
+    # every other template violation - a wrong leg count, a second expiry, a ratio other than 1 - is also a defined-risk
+    # violation, and check 5 turns those into an InvariantError rather than a soft reject (9.1)
     second_expiry = contract_at(CHAIN, CHAIN.expiries()[0], Right.PUT, 431_000)
     calendarised = msgspec.structs.replace(NARROW, legs=(Leg(contract=second_expiry, side=Side.BUY), NARROW.legs[1]))
-    verdict, _ = approve(intent_of(calendarised))
-    assert not check(verdict, "structure_not_allowed").passed  # a single expiry is part of the template
+    with pytest.raises(InvariantError, match="not defined risk"):
+        approve(intent_of(calendarised))
+    with pytest.raises(InvariantError, match="not defined risk"):
+        approve(intent_of(msgspec.structs.replace(NARROW, kind=StructureKind.LONG_PUT)))
 
 
 def test_check_4_and_5_are_not_applicable_to_closes() -> None:
     pf = portfolio(positions=(position_of(NARROW),))
-    verdict, _ = approve(intent_of(NARROW, purpose=OrderPurpose.CLOSE, limit_start=250, limit_natural=246), pf=pf)
+    verdict, _ = approve(intent_of(NARROW, purpose=OrderPurpose.CLOSE, limit_start=240, limit_natural=246), pf=pf)
     assert check(verdict, "structure_not_allowed").detail.startswith("n/a")
     assert check(verdict, "not_defined_risk").detail.startswith("n/a")
 
@@ -515,7 +529,7 @@ def test_check_5_raises_an_invariant_error_on_a_mis_ordered_or_uncovered_short()
 def test_check_5_raises_when_the_economics_are_invalid() -> None:
     """A credit at or above the width prices to `max_loss_pc <= 0`: a CandidateGenerator bug, never a soft reject."""
     with pytest.raises(InvariantError, match="max_loss_pc"):
-        approve(intent_of(NARROW, limit_start=-WIDTH, limit_natural=-WIDTH))
+        approve(intent_of(NARROW, limit_start=-WIDTH - 20, limit_natural=-WIDTH - 20))
 
 
 # ======================================================================================================================
@@ -525,7 +539,7 @@ def test_check_5_raises_when_the_economics_are_invalid() -> None:
 
 def test_check_6_requires_close_intents_opposite_sides_and_a_quantity_that_fits() -> None:
     pf = portfolio(positions=(position_of(NARROW, qty=2),))
-    good = intent_of(NARROW, purpose=OrderPurpose.CLOSE, qty=2, limit_start=250, limit_natural=246)
+    good = intent_of(NARROW, purpose=OrderPurpose.CLOSE, qty=2, limit_start=240, limit_natural=246)
     verdict, order = approve(good, pf=pf)
     assert order is not None and check(verdict, "close_only_reduces").passed
 
@@ -600,8 +614,10 @@ def test_check_7_is_not_applicable_on_an_eod_decision_snapshot_at_the_close(sess
     view = view_of(chain, session=session)
     assert view.as_of == CAL.open_close(session)[1]
     cfg = msgspec.structs.replace(Config(), cadence=msgspec.structs.replace(Config().cadence, fill_rule=fill_rule))
-    pf = portfolio(key=SnapshotKey(session=session, slot=Slot.EOD), positions=(position_of(structure),))
-    for purpose, limits in ((OrderPurpose.OPEN, (-250, -246)), (OrderPurpose.CLOSE, (250, 246))):
+    key = SnapshotKey(session=session, slot=Slot.EOD)
+    for purpose, limits in ((OrderPurpose.OPEN, (-250, -246)), (OrderPurpose.CLOSE, (240, 246))):
+        held = () if purpose is OrderPurpose.OPEN else (position_of(structure),)
+        pf = portfolio(key=key, positions=held)
         intent = intent_of(structure, purpose=purpose, session=session, limit_start=limits[0], limit_natural=limits[1])
         verdict, order = approve(intent, pf=pf, view=view, cfg=cfg, now=view.as_of)
         recorded = check(verdict, "past_order_cutoff")
@@ -612,8 +628,10 @@ def test_check_7_is_not_applicable_on_an_eod_decision_snapshot_at_the_close(sess
 def test_check_7_rejects_a_dec_snapshot_past_the_cutoff_and_approves_before_it() -> None:
     chain, structure = narrow_put_credit(make_chain(slot=Slot.DEC, fidelity=_recorded()))
     view = view_of(chain, slot=Slot.DEC, as_of=CAL.offset_from_close(SESSION, 25))
-    pf = portfolio(key=SnapshotKey(session=SESSION, slot=Slot.DEC), positions=(position_of(structure),))
-    for purpose, limits in ((OrderPurpose.OPEN, (-250, -246)), (OrderPurpose.CLOSE, (250, 246))):
+    dec_key = SnapshotKey(session=SESSION, slot=Slot.DEC)
+    pf = portfolio(key=dec_key, positions=(position_of(structure),))
+    for purpose, limits in ((OrderPurpose.OPEN, (-250, -246)), (OrderPurpose.CLOSE, (240, 246))):
+        pf = portfolio(key=dec_key, positions=() if purpose is OrderPurpose.OPEN else (position_of(structure),))
         intent = intent_of(structure, purpose=purpose, limit_start=limits[0], limit_natural=limits[1])
         late, order = approve(intent, pf=pf, view=view, now=CAL.offset_from_close(SESSION, 4))
         assert order is None and "risk:past_order_cutoff" in late.reject_codes
@@ -655,7 +673,7 @@ def test_check_8_blocks_an_open_on_clock_skew_but_never_a_close() -> None:
     verdict, order = approve(intent_of(NARROW), clock=reading)
     assert order is None and "risk:clock_skew" in verdict.reject_codes
     pf = portfolio(positions=(position_of(NARROW),))
-    verdict, order = approve(intent_of(NARROW, purpose=OrderPurpose.CLOSE, limit_start=250, limit_natural=246), pf=pf, clock=reading)
+    verdict, order = approve(intent_of(NARROW, purpose=OrderPurpose.CLOSE, limit_start=240, limit_natural=246), pf=pf, clock=reading)
     assert order is not None and check(verdict, "clock_skew").detail.startswith("n/a")
     ok = msgspec.structs.replace(reading, skew_ms=5_000)
     _, order = approve(intent_of(NARROW), clock=ok)
@@ -681,7 +699,7 @@ def test_check_9_only_crossed_quotes_delay_a_discretionary_close_and_never_a_man
     crossed_chain, crossed = narrow_put_credit(short_quote=(400, 399))
     pf = portfolio(positions=(position_of(crossed),))
     view = view_of(crossed_chain)
-    discretionary = intent_of(crossed, purpose=OrderPurpose.CLOSE, limit_start=250, limit_natural=246)
+    discretionary = intent_of(crossed, purpose=OrderPurpose.CLOSE, limit_start=240, limit_natural=246)
     verdict, order = approve(discretionary, pf=pf, view=view)
     assert order is None and not check(verdict, "crossed_quote").passed
     assert check(verdict, "stale_quote").detail.startswith("n/a")
@@ -696,7 +714,7 @@ def test_check_9_a_zero_bid_long_leg_never_blocks_a_close() -> None:
     zero_chain, zero = narrow_put_credit(long_quote=(0, 4))
     pf = portfolio(positions=(position_of(zero),))
     verdict, order = approve(
-        intent_of(zero, purpose=OrderPurpose.CLOSE, limit_start=250, limit_natural=246), pf=pf, view=view_of(zero_chain)
+        intent_of(zero, purpose=OrderPurpose.CLOSE, limit_start=240, limit_natural=246), pf=pf, view=view_of(zero_chain)
     )
     assert order is not None and check(verdict, "crossed_quote").passed
     # on an OPEN the same leg is a liquidity reject (we never open by buying a leg with no bid at all is fine, but the
@@ -833,12 +851,12 @@ def test_check_15_reduces_the_quantity_to_the_per_trade_budget_at_1_0x() -> None
 
 
 def test_check_16_leaves_room_for_the_open_working_and_already_approved_loss() -> None:
-    held = tuple(position_of(NARROW, max_loss=490_000, position_id=f"p{i}") for i in range(2))
+    held = tuple(position_of(OTHER, max_loss=490_000, position_id=f"p{i}") for i in range(2))
     pf = portfolio(positions=held)
     verdict, order = approve(intent_of(NARROW, qty=5), pf=pf)
     # aggregate cap 10% of $100,000 = 1,000,000c; 980,000 held leaves 20,000 < 25,018
     assert order is None and not check(verdict, "agg_max_loss").passed
-    smaller = (position_of(NARROW, max_loss=400_000, position_id="p0"),)
+    smaller = (position_of(OTHER, max_loss=400_000, position_id="p0"),)
     verdict, order = approve(intent_of(NARROW, qty=5), pf=portfolio(positions=smaller))
     assert order is not None and order.qty == 3 and check(verdict, "agg_max_loss").limit == 1_000_000
 
@@ -850,7 +868,7 @@ def test_check_17_fits_the_quantity_into_the_internal_and_broker_buying_power() 
     verdict, order = approve(intent_of(NARROW, qty=3))
     assert order is not None and check(verdict, "buying_power").detail == "bp_pc=25000"
 
-    tight = portfolio(positions=(position_of(NARROW, bp_reserved=4_960_000, position_id="p0"),), broker_options_bp=None)
+    tight = portfolio(positions=(position_of(OTHER, bp_reserved=4_960_000, position_id="p0"),), broker_options_bp=None)
     verdict, order = approve(intent_of(NARROW, qty=3), pf=tight)
     assert order is not None and order.qty == 1  # 40,000 // 25,000 = 1
 
@@ -942,11 +960,11 @@ def test_check_19_rejects_an_off_tick_limit_and_a_price_beyond_natural() -> None
     verdict, order = approve(closing, pf=pf)
     assert order is None and not check(verdict, "beyond_natural").passed
     # a mandatory close may go past natural by the cushion: ceil(0.15 * 500) = 75c
-    mandatory = msgspec.structs.replace(closing, mandatory=True, limit_start=321)
+    mandatory = msgspec.structs.replace(closing, mandatory=True, limit_start=246 + 76)
     verdict, order = approve(mandatory, pf=pf)
     assert order is None and check(verdict, "beyond_natural").limit == 75
-    _, order = approve(msgspec.structs.replace(mandatory, limit_start=321 - 1), pf=pf)
-    assert order is not None
+    verdict, order = approve(msgspec.structs.replace(mandatory, limit_start=246 + 75), pf=pf)
+    assert order is not None and check(verdict, "beyond_natural").observed == 75
 
 
 def test_check_19_raises_on_the_condor_sign_trap() -> None:
@@ -970,7 +988,7 @@ def test_check_21_throttles_entries_and_discretionary_closes_only() -> None:
     verdict, order = approve(intent_of(NARROW), pf=busy)
     assert order is None and not check(verdict, "order_rate").passed
 
-    discretionary = intent_of(NARROW, purpose=OrderPurpose.CLOSE, limit_start=250, limit_natural=246)
+    discretionary = intent_of(NARROW, purpose=OrderPurpose.CLOSE, limit_start=240, limit_natural=246)
     verdict, order = approve(discretionary, pf=busy)
     assert order is None and not check(verdict, "order_rate").passed
 
@@ -1055,7 +1073,7 @@ def test_recheck_fill_re_evaluates_the_dte_window_and_the_ex_dividend_block() ->
 
 def test_recheck_fill_passes_a_close_through_untouched() -> None:
     qty, code = engine().recheck_fill(
-        intent_of(NARROW, purpose=OrderPurpose.CLOSE, qty=4, limit_start=250, limit_natural=246),
+        intent_of(NARROW, purpose=OrderPurpose.CLOSE, qty=4, limit_start=240, limit_natural=246),
         BandPrices(orats=250, worst=260, mid=245),
         portfolio(),
         NARROW_VIEW,
@@ -1106,12 +1124,13 @@ def test_hard_exit_forces_the_expiry_close_counted_to_last_session(expiry: date,
 def test_hard_exit_time_exit_uses_calendar_days_to_last_session_per_premium_side() -> None:
     eng = engine()
     far = structure_expiring(date(2024, 6, 21))
+    quiet = position_of(far, liq_value=150)  # pnl = (200 - 150) * 100 = 5,000: neither the stop nor the target
     session = date(2024, 6, 13)  # 8 calendar days to 06-21
-    assert eng.hard_exit(position_of(far), view_of(None, session=session)) is None
+    assert eng.hard_exit(quiet, view_of(None, session=session)) is None
     session = date(2024, 6, 14)  # 7 days: the short-premium time exit fires
-    assert eng.hard_exit(position_of(far), view_of(None, session=session)) is ExitReason.TIME_EXIT
+    assert eng.hard_exit(quiet, view_of(None, session=session)) is ExitReason.TIME_EXIT
     cfg = msgspec.structs.replace(Config(), dte=msgspec.structs.replace(Config().dte, time_exit_short_premium=3))
-    assert DefaultRiskEngine(cfg).hard_exit(position_of(far), view_of(None, session=session)) is None
+    assert DefaultRiskEngine(cfg).hard_exit(quiet, view_of(None, session=session)) is None
 
 
 def test_hard_exit_stop_loss_and_profit_target_use_the_headline_conservative_mark() -> None:
