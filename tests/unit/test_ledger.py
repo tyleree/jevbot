@@ -10,6 +10,7 @@ import hashlib
 import inspect
 import json
 import sqlite3
+import stat
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -18,7 +19,7 @@ from typing import Any
 import msgspec
 import pytest
 
-from jevbot.canon import GENESIS_HASH, dumps_sorted, sha256_hex
+from jevbot.canon import GENESIS_HASH, dumps_sorted, ledger_entry_hash, sha256_hex
 from jevbot.errors import InvariantError, LedgerCorrupt
 from jevbot.ledger import LAST_VERIFIED_SEQ, VIEW_COLUMNS, SqliteLedger
 from jevbot.types import (
@@ -261,6 +262,65 @@ def test_verify_detects_every_tamper(store_path: Path, sql: str, params: tuple[s
             store.verify()
 
 
+def stored_row(path: Path, seq: int) -> tuple[str, str, str, str, str]:
+    """`(kind, session, as_of, payload, prev_hash)` of one persisted row, read through a raw connection."""
+    connection = raw(path)
+    try:
+        row = connection.execute("SELECT kind, session, as_of, payload, prev_hash FROM ledger WHERE seq = ?", (seq,)).fetchone()
+    finally:
+        connection.close()
+    return (str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]))
+
+
+def test_verify_detects_an_entry_that_was_re_chained(store_path: Path) -> None:
+    """The one attack the hash CHAIN exists to stop: forge seq 2 AND recompute its own hash from its stored `prev_hash`,
+    so that the row itself is perfectly self-consistent. Only its successor's linkage gives it away (INV-19)."""
+    with SqliteLedger(store_path) as store:
+        marks(store, 4)
+        store.commit()
+        intact = [e.hash for e in store.entries()]
+    drop_triggers(store_path)
+    kind, session, as_of, _, prev_hash = stored_row(store_path, 2)
+    forged_payload = dumps_sorted({"i": 99})
+    forged_hash = ledger_entry_hash(prev_hash, 2, kind, session, as_of, forged_payload)
+    assert forged_hash != intact[1]
+    connection = raw(store_path)
+    try:
+        connection.execute("UPDATE ledger SET payload = ?, hash = ? WHERE seq = 2", (forged_payload, forged_hash))
+    finally:
+        connection.close()
+
+    with SqliteLedger(store_path) as store:
+        assert [(e.seq, e.payload) for e in store.entries()][1] == (2, {"i": 99})  # the walk streams: the check is in verify()
+        assert [e.seq for e in store.entries()] == [1, 2, 3, 4]
+        with pytest.raises(LedgerCorrupt, match="seq 3"):
+            store.verify()  # seq 2 re-hashes to its own forged hash; seq 3's prev_hash no longer matches it
+        with pytest.raises(LedgerCorrupt, match="prev_hash"):
+            store.verify(from_seq=3)  # ... and the incremental check of 9.6 R5 sees it too
+        store.verify(from_seq=4)  # the linkage from seq 4 on is untouched
+        assert store.last_verified_seq == 0  # a walk that never reached seq 3 never claims it
+
+
+def test_verify_detects_a_rewritten_prev_hash_column(store_path: Path) -> None:
+    """The hash covers `prev_hash` too, but the linkage is checked FIRST, so the failure names the broken link."""
+    with SqliteLedger(store_path) as store:
+        marks(store, 4)
+        store.commit()
+    drop_triggers(store_path)
+    connection = raw(store_path)
+    try:
+        connection.execute("UPDATE ledger SET prev_hash = ? WHERE seq = 3", ("a" * 64,))
+    finally:
+        connection.close()
+    with SqliteLedger(store_path) as store:
+        assert [e.seq for e in store.entries()] == [1, 2, 3, 4]  # entries() still streams
+        assert next(e for e in store.entries() if e.seq == 3).prev_hash == "a" * 64
+        with pytest.raises(LedgerCorrupt, match="ledger seq 3: prev_hash"):
+            store.verify()
+        with pytest.raises(LedgerCorrupt, match="ledger seq 3: prev_hash"):
+            store.verify(from_seq=3)
+
+
 def test_incremental_verify_starts_where_it_is_told(store_path: Path) -> None:
     with SqliteLedger(store_path) as store:
         marks(store, 4)
@@ -296,8 +356,69 @@ def test_verify_records_how_far_it_checked(ledger: SqliteLedger) -> None:
     marks(ledger, 2)
     ledger.verify(from_seq=7)  # a gap: seq 6 was never verified, so the high-water mark does not move
     assert ledger.last_verified_seq == 5
-    with pytest.raises(InvariantError, match=LAST_VERIFIED_SEQ):
-        ledger.set_meta(LAST_VERIFIED_SEQ, "99")  # bookkeeping, not run data
+
+
+def test_the_high_water_mark_is_the_one_rewritable_meta_key(ledger: SqliteLedger) -> None:
+    """9.6 R5 needs "incremental since the last verified seq" to work against EVERY `Ledger` of 3.4, so the mark is read
+    portably with `get_meta(LAST_VERIFIED_SEQ)` and - unlike every other meta key - may be rewritten by a consumer whose
+    implementation does not maintain it inside `verify()` itself."""
+    marks(ledger, 7)
+    ledger.verify()
+    assert ledger.get_meta(LAST_VERIFIED_SEQ) == "7"  # the portable read, maintained by verify() in this store
+    ledger.set_meta(LAST_VERIFIED_SEQ, "7")  # the same value again: a no-op, as for any other key
+    ledger.set_meta(LAST_VERIFIED_SEQ, "2")  # last write wins; a LOWER mark only means more re-verification
+    assert ledger.last_verified_seq == 2 and ledger.get_meta(LAST_VERIFIED_SEQ) == "2"
+    ledger.verify(from_seq=3)  # ... and the store picks up exactly where the consumer left it
+    assert ledger.last_verified_seq == 7
+    for bogus in ("8", "99", "-1", "3.0", " 3", "3_0", "three", ""):
+        with pytest.raises(InvariantError, match=LAST_VERIFIED_SEQ if bogus else "non-empty"):
+            ledger.set_meta(LAST_VERIFIED_SEQ, bogus)  # never past the head, never anything but plain digits
+    assert ledger.get_meta(LAST_VERIFIED_SEQ) == "7"
+
+
+def test_verify_still_succeeds_when_the_marker_cannot_be_written(ledger: SqliteLedger) -> None:
+    """3.4 specifies `verify()` as a READ ("recompute the chain; raises LedgerCorrupt"): its bookkeeping row is written
+    best effort, so a store that cannot be written right now still verifies - and a raw driver failure that DOES reach a
+    caller is a `LedgerCorrupt` (exit 9, 2.9), never a bare `sqlite3.Error` (exit 1)."""
+    marks(ledger, 3)
+    ledger.verify()
+    connection = raw(ledger.path)
+    try:
+        connection.execute("DROP TABLE meta")  # the bookkeeping table is gone; the chain itself is untouched
+    finally:
+        connection.close()
+    marks(ledger, 1)
+    ledger.verify()  # the verification succeeds; only the marker could not be moved
+    ledger.verify(from_seq=4)
+    for unwritable in (
+        lambda: ledger.get_meta(LAST_VERIFIED_SEQ),
+        lambda: ledger.set_meta("config_hash", "abc"),
+        lambda: ledger.last_verified_seq,
+    ):
+        with pytest.raises(LedgerCorrupt, match=str(ledger.path)):
+            unwritable()
+
+
+def test_verifying_an_intact_store_never_needs_the_write_lock(store_path: Path) -> None:
+    """WP11 reads a finished run store and 9.6 R5 verifies every cycle: an already verified, intact chain re-verifies
+    while another process holds the write lock, because neither opening the store nor the walk writes anything."""
+    with SqliteLedger(store_path) as writer:
+        marks(writer, 3)
+        writer.commit()
+        writer.verify()
+    with SqliteLedger(store_path) as reader:
+        blocker = raw(store_path)
+        try:
+            blocker.execute("BEGIN IMMEDIATE")  # a concurrent writer holds the store
+            blocker.execute("INSERT INTO meta (key, value) VALUES ('held', 'yes')")
+            reader.verify()  # the full check of 9.6 R5 at startup ...
+            reader.verify(from_seq=4)  # ... and the incremental one
+            assert reader.last_verified_seq == 3
+            assert [e.seq for e in reader.entries()] == [1, 2, 3]
+            assert list(reader.get_states("entry")) == [] and reader.fill_ids() == ()
+        finally:
+            blocker.execute("ROLLBACK")
+            blocker.close()
 
 
 # ======================================================================================================================

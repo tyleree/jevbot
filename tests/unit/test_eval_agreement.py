@@ -463,6 +463,27 @@ def test_a_decision_without_an_underlying_is_refused(tmp_path: Path) -> None:
         model_agreement(old, new, PRIMARY)
 
 
+def test_a_decision_without_an_action_is_refused(tmp_path: Path) -> None:
+    """`action` is the field statistic (a) is ABOUT and 2.6 makes it non-optional: a payload without it is malformed.
+
+    Defaulting it to `""` would make two malformed stores "agree" and inflate the 12.9(a) gate-decision agreement rate
+    towards 1.0 on data that carries no decision at all.
+    """
+    payload = {"kind": "entry", "requests": [], "rules": {"underlying": "SPY", "kind": "iron_condor"}}
+    old = _rebuild_with_payload(tmp_path / "old.sqlite", "ns_old", payload)
+    new = build_store(tmp_path / "new.sqlite", namespace="ns_new", decisions=_sample_decisions())
+    with pytest.raises(EvalError, match="names no action"):
+        model_agreement(old, new, PRIMARY)
+
+
+def test_a_decision_with_a_non_string_action_is_refused(tmp_path: Path) -> None:
+    payload = {"kind": "entry", "requests": [], "rules": {"underlying": "SPY", "action": 1, "kind": "iron_condor"}}
+    old = _rebuild_with_payload(tmp_path / "old.sqlite", "ns_old", payload)
+    new = build_store(tmp_path / "new.sqlite", namespace="ns_new", decisions=_sample_decisions())
+    with pytest.raises(EvalError, match="names no action"):
+        model_agreement(old, new, PRIMARY)
+
+
 def test_a_malformed_choice_answer_is_refused(tmp_path: Path) -> None:
     """The Choice answer contract of 2.11: `{label: ppm int}` (or an explicit `{"top": ..., "probs": ...}`)."""
     payload = {

@@ -11,13 +11,17 @@ which is exactly how a wake from sleep is detected (`needs_sync`).
 **The measured skew must not be an artefact of a slow read.** `sync()` brackets `get_clock()` between two boottime readings
 and compares the broker timestamp with the local UTC time at the MIDPOINT of the round trip, so a 400 ms request contributes
 0 ms of apparent skew instead of 200 ms (D25: skew > 5 s blocks *opening* orders; V3: closes continue on broker time, so a
-fake skew must never strand a must-exit position).
+fake skew must never strand a must-exit position). The broker stamp refers to that same midpoint, so `now()` extrapolates
+from it and **not** from the end of the round trip: anchoring at `t1` would leave `now()` a constant `rtt / 2` behind true
+broker time - the unsafe direction next to the close - 5 min submission cut-off (11.4).
 
 `AlpacaCalendar` turns `get_calendar()` rows into the `Calendar` protocol of 3.1. The vendor model parses `open` / `close`
 as NAIVE datetimes built from the row's date and a "%H:%M" exchange-local string, so they are localised with
 `ZoneInfo("America/New_York")` and converted to UTC - which is what makes a DST boundary come out right. At boot the rows are
-cross-checked against XNYS: **the earlier close wins** and every disagreement raises an alert (G4). All cut-offs are offsets
-from that day's close (`offset_from_close`); this module contains no time of day (INV-13).
+cross-checked against XNYS: **the earlier close wins**, the session set is the **union** of the two calendars, and every
+disagreement raises an alert (G4). Keeping a session only the cross-check knows is deliberate: a day this object called a
+non-session would get no cycle at all, so a mandatory-exit day could silently disappear (INV-11, INV-21). All cut-offs are
+offsets from that day's close (`offset_from_close`); this module contains no time of day (INV-13).
 """
 
 import time
@@ -107,6 +111,12 @@ class BrokerClock:
 
     `fetch` returns one vendor clock reading; `paper/broker.py::AlpacaPaperBroker.raw_clock` supplies it so that the call
     carries the adapter's deadline, timeout and rate limit. `boottime_fn` / `utcnow` exist for tests only.
+
+    **A detected wake from sleep is sticky** (`slept`). 11.4 makes a boottime gap "re-sync + reconcile before anything else",
+    and sync runs every 60 s, at every phase boundary and before every order - so the call that first observes the gap is
+    usually `sync()` itself, which then repairs the clock and would erase the evidence. `sync()` therefore records the gap in
+    `slept`, which stays True until the runner calls `acknowledge_sleep()` after it has reconciled. `needs_sync` is
+    deliberately NOT tied to it: a runner that loops "if needs_sync: sync()" must be able to make progress.
     """
 
     def __init__(

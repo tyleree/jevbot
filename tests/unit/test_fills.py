@@ -327,6 +327,12 @@ def test_each_rejection_code_of_10_4() -> None:
     # crossed_or_locked: ask <= bid with bid > 0
     assert model.check([buy_to_open(c)], 1, plant(chain, {c: (110, 100)}), mandatory=False) == (CROSSED,)
     assert model.check([sell_to_close(c)], 1, plant(chain, {c: (100, 100)}), mandatory=False) == (CROSSED,)
+    # ... and a positive bid with NO ask matches both rules at once: each is evaluated on its own and both are reported
+    no_ask = plant(chain, {c: (100, 0)})
+    assert model.check([buy_to_open(c)], 1, no_ask, mandatory=False) == (NO_QUOTE, CROSSED)  # rule (a): a BUY without an ask
+    assert model.check([sell_to_close(c)], 1, no_ask, mandatory=False) == (NO_QUOTE, CROSSED)  # the exemption needs ask > 0
+    # a SELL-to-open into a crossed market with a positive bid is crossed only: 10.4 (b) is about `bid <= 0`
+    assert model.check([sell_to_open(c)], 1, plant(chain, {c: (110, 100)}), mandatory=False) == (CROSSED,)
 
     # wide_spread: spread > max(0.25 * mid, 15). bid 100 ask 160 -> 60 > max(32.5, 15)
     assert model.check([buy_to_open(c)], 1, plant(chain, {c: (100, 160)}), mandatory=False) == (WIDE_SPREAD,)
@@ -590,6 +596,19 @@ def test_the_fallback_bound_prices_unusable_legs_when_no_previous_mark_exists() 
     # a missing LONG leg falls back to its intrinsic (0 for the 450 call at spot 450.00)
     missing_long = cf.drop_contract(plant(chain, {short_call: (700, 706)}), long_call)
     assert model.liquidation(spread, missing_long, None) == (706, 703, True)  # 706 - 0 ; ceil(1406 / 2) - 0
+
+    # a SHORT leg with a positive bid and NO ask: the row shows no ask at all, so `max(intrinsic, last ask)` has only the
+    # bid to stand in for the last ask - a bound that can UNDERSTATE what closing costs (documented; see `last_asks`)
+    no_ask_low = plant(chain, {short_call: (300, 0), long_call: (300, 308)})
+    assert model.liquidation(spread, no_ask_low, None) == (500 - 300, 500 - 304, True)  # intrinsic 500 beats the bid 300
+    no_ask_high = plant(chain, {short_call: (700, 0), long_call: (300, 308)})
+    assert model.liquidation(spread, no_ask_high, None) == (700 - 300, 700 - 304, True)  # the bid 700 beats the intrinsic
+    # with the last ask carried per leg, 10.5's bound is evaluated as it is written
+    assert model.liquidation(spread, no_ask_high, None, last_asks={short_call.occ: 900}) == (900 - 300, 900 - 304, True)
+    assert model.liquidation(spread, no_ask_high, None, last_asks={short_call.occ: 100}) == (700 - 300, 700 - 304, True)
+    assert model.liquidation(spread, no_ask_high, (11, 12), last_asks={short_call.occ: 900}) == (11, 12, True)  # `last` wins
+    with pytest.raises(InvariantError):
+        model.liquidation(spread, no_ask_high, None, last_asks={short_call.occ: 9.5})  # type: ignore[dict-item]
 
 
 def test_liquidation_refuses_a_foreign_or_empty_structure() -> None:

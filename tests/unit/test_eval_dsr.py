@@ -241,16 +241,29 @@ def test_dsr_guard_for_fewer_than_two_trials() -> None:
     result = deflated_sharpe(returns, n_trials=1, completed_sharpes=[0.03])
     assert result.sr0 == 0.0
     assert "dsr_trials<2" in result.flags
+    assert "dsr_var_sr_undefined" not in result.flags  # the variance detail belongs to the N >= 2 branch
     assert result.dsr == pytest.approx(result.psr_zero)
 
 
 def test_dsr_guard_for_an_undefined_variance_of_the_trial_sharpes() -> None:
+    """12.6 names ONE flag for both guard conditions: an undefined `Var(SR_n)` deflates by `SR0 = 0` exactly as N < 2.
+
+    A report or consumer keyed on the spec's flag string must therefore see `dsr_trials<2` here too; the more precise
+    `dsr_var_sr_undefined` is printed beside it, never instead of it.
+    """
     rng = np.random.default_rng(17)
     returns = _series(rng)
     result = deflated_sharpe(returns, n_trials=6, completed_sharpes=[0.03])  # one completed trial => Var undefined
     assert math.isnan(result.var_sr)
     assert result.sr0 == 0.0
-    assert "dsr_var_sr_undefined" in result.flags
+    assert "dsr_trials<2" in result.flags  # the flag 12.6 names for BOTH guard conditions
+    assert "dsr_var_sr_undefined" in result.flags  # the extra detail, beside it
+
+    # a zero variance (every completed trial has the same Sharpe) is the other half of the same guard
+    zero_var = deflated_sharpe(returns, n_trials=6, completed_sharpes=[0.03, 0.03, 0.03])
+    assert zero_var.var_sr == 0.0
+    assert zero_var.sr0 == 0.0
+    assert "dsr_trials<2" in zero_var.flags
     assert result.dsr == pytest.approx(result.psr_zero)
 
 

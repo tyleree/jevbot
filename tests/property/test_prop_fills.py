@@ -88,7 +88,7 @@ def market() -> tuple[ChainSnapshot, tuple[OptionContract, ...]]:
 
 
 def draw_quote(rng: np.random.Generator) -> tuple[int, int]:
-    """A quote of one of the shapes real chains carry: two-sided, zero-bid, absent, crossed, locked or very wide."""
+    """A quote of one of the shapes real chains carry: two-sided, zero-bid, absent, bid-only, crossed, locked or wide."""
     shape = int(rng.integers(0, 10))
     if shape == 0:
         return (0, 0)  # no quote at all
@@ -103,6 +103,8 @@ def draw_quote(rng: np.random.Generator) -> tuple[int, int]:
     if shape == 4:
         bid = int(rng.integers(1, 500))
         return (bid, bid + int(rng.integers(40, 400)))  # very wide
+    if shape == 5:
+        return (int(rng.integers(1, 500)), 0)  # a bid with no ask at all: 10.4 rule (a) AND the crossed rule
     bid = int(rng.integers(0, 2_000))
     return (bid, bid + int(rng.integers(1, 12)))
 
@@ -226,6 +228,30 @@ def test_rejection_is_band_independent() -> None:
         assert MODEL.check(legs, qty, planted, mandatory=True) == ()  # a forced fill is never rejected
         seen.add(codes)
     assert len({code for codes in seen for code in codes}) >= 4  # the draw really exercises several rejection reasons
+
+
+def test_the_no_quote_and_crossed_rules_are_evaluated_independently() -> None:
+    """10.4: `no_quote` is (a) any BUY leg without an ask and (b) a SELL leg of an OPEN with `bid <= 0` (plus a market with
+    no ask at all, which the zero-bid sell-to-close exemption does not cover: it needs `ask > 0`); `crossed_or_locked` is
+    `ask <= bid` with `bid > 0`. Neither rule is the other's `else`, so a `bid x 0` row carries both codes."""
+    rng = rng_for("independent-rules")
+    chain, contracts = market()
+    both = 0
+    for _ in range(N_MARKETS):
+        quotes = {contract: draw_quote(rng) for contract in contracts}
+        planted = plant(chain, quotes)
+        legs = draw_legs(rng, contracts)
+        codes = MODEL.check(legs, 1, planted, mandatory=False)
+        want_no_quote = want_crossed = False
+        for leg in legs:
+            bid, ask = quotes[leg.contract]
+            opening_sale = leg.side is Side.SELL and leg.position_intent is PositionIntent.STO
+            want_no_quote = want_no_quote or ask <= 0 or (opening_sale and bid <= 0)
+            want_crossed = want_crossed or (bid > 0 and ask <= bid)
+        assert ("no_quote" in codes) is want_no_quote
+        assert ("crossed_or_locked" in codes) is want_crossed
+        both += want_no_quote and want_crossed
+    assert both >= 5  # the draw really produces markets where both codes are due
 
 
 def test_a_forced_fill_is_never_better_than_the_worst_band() -> None:

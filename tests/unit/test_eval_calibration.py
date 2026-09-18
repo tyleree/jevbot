@@ -543,6 +543,78 @@ def test_timestamp_typed_session_columns_are_accepted() -> None:
     assert np.allclose(cal.base_rate_expanding(stamped_events, stamped_history, min_events=250), as_dates, equal_nan=True)
 
 
+def _stamped(frame: pd.DataFrame) -> pd.DataFrame:
+    """The same frame with datetime64 `session` / `resolved_on` columns, as `eval.load` hands them over."""
+    return frame.assign(
+        session=pd.to_datetime(frame["session"]),
+        resolved_on=pd.to_datetime(frame["resolved_on"]),
+        y=frame["y"].astype(float),
+    )
+
+
+def test_still_open_rows_are_missing_dates_not_dates_on_a_datetime64_frame() -> None:
+    """A still-open forecast is `NaT` on a datetime64 `resolved_on` column - and `NaT` is NOT a date.
+
+    `NaTType` subclasses `datetime.datetime`, so a plain `isinstance(value, date)` test accepts it, the sorted session
+    grid then dies with a raw `TypeError: Cannot compare NaT with datetime.date object`, and the caller gets no
+    diagnostic at all.  12.3 has the report state "N resolved / open / void / missing", so open rows are a normal part
+    of the calibration frame and every date reader of the module must treat `NaT` exactly like `None`.
+    """
+    rng = np.random.default_rng(112)
+    history = _stamped(_history_frame(rng, n_sessions=260, start=0))
+    events = _stamped(_events_frame(rng, n_sessions=5, start=261, p_forecast=0.12))
+
+    open_rows = np.asarray(events["session"] == events["session"].max())
+    events.loc[open_rows, "resolved_on"] = pd.NaT  # the last session has not resolved yet
+    events.loc[open_rows, "y"] = np.nan
+
+    grid = cal.session_grid(events, history)
+    assert grid == sorted(set(grid))
+    assert all(isinstance(day, date) and not pd.isna(day) for day in grid)
+
+    # the same frame with the open rows spelled `None` on an object column must give the identical answer
+    as_objects = events.assign(
+        session=[v.date() for v in events["session"]],
+        resolved_on=[None if pd.isna(v) else v.date() for v in events["resolved_on"]],
+    )
+    history_objects = history.assign(
+        session=[v.date() for v in history["session"]], resolved_on=[v.date() for v in history["resolved_on"]]
+    )
+    for min_events in (250,):
+        assert np.allclose(
+            cal.base_rate_expanding(events, history, min_events=min_events),
+            cal.base_rate_expanding(as_objects, history_objects, min_events=min_events),
+            equal_nan=True,
+        )
+        assert np.allclose(
+            cal.recalibrate_walkforward(events, history, min_events=min_events, refit_sessions=21),
+            cal.recalibrate_walkforward(as_objects, history_objects, min_events=min_events, refit_sessions=21),
+            equal_nan=True,
+        )
+    refs = cal.build_references(events, history, recal_min_events=250, base_rate_min_events=250, refit_sessions=21)
+    eligible = cal.eligible_sessions(events, {k: refs[k] for k in ("implied_recalibrated", "base_rate_expanding")}, QUESTIONS)
+    assert list(eligible) == sorted(set(v.date() for v in events["session"]))
+
+
+def test_a_missing_session_never_becomes_an_eligible_day() -> None:
+    """The counterpart on the `session` column: a row without a session is aligned positionally and simply never on a day."""
+    rng = np.random.default_rng(114)
+    history = _stamped(_history_frame(rng, n_sessions=260, start=0))
+    events = _stamped(_events_frame(rng, n_sessions=4, start=261, p_forecast=0.12))
+    events.loc[events.index[0], "session"] = pd.NaT
+
+    assert len(cal.unique_sessions(events["session"].tolist())) == 3
+    refs = cal.build_references(events, history, recal_min_events=250, base_rate_min_events=250, refit_sessions=21)
+    for name in ("implied_recalibrated", "base_rate_expanding"):
+        assert len(refs[name]) == len(events)  # positional alignment survives the missing date
+    eligible = cal.eligible_sessions(events, {k: refs[k] for k in ("implied_recalibrated", "base_rate_expanding")}, QUESTIONS)
+    assert len(eligible) == 3
+    assert not any(pd.isna(day) for day in eligible)
+
+    d = cal.loss_differential(refs["base_rate_expanding"], events["p"], events["y"], events["session"], events["question_id"])
+    assert d.size == 3
+
+
 def test_an_explicit_session_grid_overrides_the_derived_one() -> None:
     """A caller holding the real `Calendar` can pass the trading-session grid instead of the data-derived one."""
     rng = np.random.default_rng(110)
@@ -729,6 +801,39 @@ def test_loss_differential_refuses_misaligned_inputs() -> None:
         cal.loss_differential([0.5, 0.5], [0.1, 0.1], [0, 0], [_day(0)], ["q", "q"])
 
 
+def test_an_unscorable_session_is_excluded_and_listed_never_averaged_away() -> None:
+    """12.1 `missing`: void outcomes are EXCLUDED AND LISTED - the bound may not absorb them replicate by replicate.
+
+    `eligible_sessions` calls a session eligible on reference availability alone, so a session whose every primary
+    question is void is eligible and carries a `NaN` `d_t`.  The caller splits the series here and reports the dropped
+    sessions; `lower_bound` refuses a series that still carries one.
+    """
+    sessions = [_day(i) for i in range(3) for _ in range(2)]
+    questions = ["q1", "q2"] * 3
+    y = [0, 0, 0, float("nan"), 0, 0]  # the middle session's q2 is void
+    d = cal.loss_differential([0.5] * 6, [0.1] * 6, y, sessions, questions)
+    index = cal.unique_sessions(sessions)
+
+    # the void session IS eligible: eligibility is defined on reference availability only (12.1 `eligible_session`)
+    events = pd.DataFrame({"session": sessions, "question_id": questions})
+    refs = {"a": np.zeros(6), "b": np.zeros(6)}
+    assert cal.eligible_sessions(events, refs, ("q1", "q2")).tolist() == list(index)
+
+    kept, kept_sessions, dropped = cal.exclude_unscorable_sessions(d, index)
+    assert kept.tolist() == pytest.approx([0.24, 0.24])
+    assert list(kept_sessions) == [_day(0), _day(2)]
+    assert list(dropped) == [_day(1)]
+
+    with pytest.raises(EvalError, match="non-finite at positions"):
+        lower_bound(d, alpha=0.05, block=2.0, reps=50, rng=np.random.default_rng(0), interval="percentile")
+    assert math.isfinite(lower_bound(kept, alpha=0.05, block=2.0, reps=50, rng=np.random.default_rng(0), interval="percentile"))
+
+
+def test_exclude_unscorable_sessions_refuses_a_misaligned_index() -> None:
+    with pytest.raises(EvalError, match="d_t has 2 values"):
+        cal.exclude_unscorable_sessions([0.1, 0.2], cal.unique_sessions([_day(0), _day(1), _day(2)]))
+
+
 # ======================================================================================================================
 # history can never reach a scored table (12.1 exemption 1)
 # ======================================================================================================================
@@ -835,9 +940,13 @@ def test_constant_climatological_forecaster_beats_raw_implied_but_fails_the_join
     assert len(eligible) == 250
     look = cal.require_evaluable_look(eligible, n_sessions=120, look="look 1")
     bounds = _joint_test(events, refs, look, alpha=0.01)
-    # A climatological constant IS the expanding base rate, so against that reference it ties (and may narrowly win,
-    # the sampling noise of the estimate being a second-order Brier cost).  That is exactly why the pre-registration
-    # requires BOTH references: against the recalibrated implied probability the same forecaster shows nothing.
+    # A climatological constant IS the expanding base rate, so against that reference it ties.  The bound against it
+    # lands a sliver ABOVE zero - a false rejection of the over-sized percentile interval (test_eval_bootstrap measures
+    # its size at about 0.085 against a nominal 0.05 on this `d_t` structure, which is why 12.3 has `eval power` choose
+    # the interval by measured size), not skill: it is four orders of magnitude below the Brier scale of the question.
+    assert abs(bounds["base_rate_expanding"]) < 1e-3, bounds
+    # That is exactly why the pre-registration requires BOTH references: against the recalibrated implied probability
+    # the same forecaster shows nothing at all.
     assert bounds["implied_recalibrated"] <= 0.0, bounds
     assert not all(bound > 0.0 for bound in bounds.values()), "the zero-skill forecaster passed the joint test"
 
