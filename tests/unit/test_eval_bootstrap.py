@@ -5,8 +5,11 @@ The two acceptance tests of 15.1 / 12.3 are here:
 * **CI coverage on AR(1)** - the stationary bootstrap holds its nominal coverage on a serially dependent series, the
   i.i.d. bootstrap does not;
 * **the size check** - on a zero-mean `d_t` with the pre-registered 5-session overlap and cross-sectional correlation,
-  the one-sided lower bound of the chosen interval method rejects at about `alpha`, while a deliberately mis-sized
-  method (an i.i.d. bootstrap, `block = 1`) is detected as **over-sized** by the same check.
+  the three `interval_candidates` are measured in order against the prereg's own `size_rule` budget and the first one
+  that holds its size is the chosen interval; the percentile bound does **not** hold it (12.3 says so outright), and a
+  deliberately mis-sized method (an i.i.d. bootstrap, `block = 1`) is detected as over-sized by the same rule;
+* **the finiteness contract** - a `d_t` carrying an unscorable session is refused by ALL THREE interval methods alike
+  (12.1 `missing`: such sessions are excluded and listed, never absorbed by a replicate filter).
 
 Everything is seeded; the Monte-Carlo tolerances are stated as multiples of the simulation standard error.
 """
@@ -22,6 +25,8 @@ import pytest
 
 from jevbot.errors import EvalError, PreregError
 from jevbot.eval.bootstrap import (
+    Interval,
+    IntervalMethod,
     block_length_sample,
     block_se,
     bootstrap_ci,
@@ -252,24 +257,109 @@ def _overlapping_correlated_d(
     return np.asarray(smoothed.mean(axis=0), dtype=np.float64)
 
 
-def test_size_of_the_one_sided_bound_is_nominal_for_the_block_method_and_over_sized_for_iid() -> None:
-    """12.3 / 15.1: nominal size for the chosen interval, `over-sized` detected for an i.i.d. bootstrap (block = 1)."""
-    n_sims, n, alpha = 250, 320, 0.05
-    rng = np.random.default_rng(4242)
-    rejected_block = 0
-    rejected_iid = 0
-    for _ in range(n_sims):
-        d = _overlapping_correlated_d(rng, n=n)  # true mean 0: every rejection is a false positive
-        rejected_block += int(lower_bound(d, alpha=alpha, block=12.0, reps=400, rng=rng, interval="percentile") > 0.0)
-        rejected_iid += int(lower_bound(d, alpha=alpha, block=1.0, reps=400, rng=rng, interval="percentile") > 0.0)
+#: the prereg's `interval_candidates`, in the order `eval power` checks them (12.1, 12.3).
+INTERVAL_CANDIDATES: tuple[IntervalMethod, ...] = ("percentile", "studentised", "null_calibrated")
+#: `eval.null_sim_reps` - the denominator the prereg's own `size_rule` budget is computed with.
+NULL_SIM_REPS = 2000
+SIZE_N = 320  # sessions per simulated experiment, comfortably past the 250-session final look
+SIZE_ALPHA = 0.05
+SIZE_BLOCK = 12.0  # >= 2 x the longest primary horizon and >= the prereg's `min_block` of 10
+SIZE_REPS = 300
 
-    # the prereg `size_rule`: empirical rejection rate <= alpha + 2 * sqrt(alpha (1 - alpha) / reps)
-    tolerance = alpha + 3.0 * math.sqrt(alpha * (1.0 - alpha) / n_sims)
-    block_rate = rejected_block / n_sims
-    iid_rate = rejected_iid / n_sims
-    assert block_rate <= tolerance + 0.02, f"block method size {block_rate}, budget {tolerance}"
-    assert iid_rate > 0.15, f"the i.i.d. bootstrap must be flagged over-sized, got {iid_rate}"
-    assert iid_rate > block_rate + 0.05
+
+def _size_budget(alpha: float, n_sims: int) -> float:
+    """The prereg `size_rule` **verbatim**: `alpha + 2 * sqrt(alpha * (1 - alpha) / eval.null_sim_reps)`."""
+    return alpha + 2.0 * math.sqrt(alpha * (1.0 - alpha) / n_sims)
+
+
+def _null_experiments(seed: int, *, n_sims: int, n: int, shift: float = 0.0) -> list[FloatArray]:
+    """`n_sims` simulated experiments, drawn ONCE so every interval candidate is measured on identical data."""
+    rng = np.random.default_rng(seed)
+    return [_overlapping_correlated_d(rng, n=n) + shift for _ in range(n_sims)]
+
+
+def _null_critical(seed: int, *, n: int, block: float, alpha: float, sims: int) -> float:
+    """`eval power`'s N1 calibration: the empirical `1 - alpha` quantile of the studentised statistic under the null.
+
+    This is what `prereg/power.v1.json` stores and `lower_bound(interval="null_calibrated")` is handed (12.3, 12.5).
+    """
+    series = _null_experiments(seed, n_sims=sims, n=n)
+    t = np.asarray([float(d.mean()) / block_se(d, block) for d in series], dtype=np.float64)
+    return float(np.quantile(t, 1.0 - alpha))
+
+
+def _rejection_rate(
+    series: list[FloatArray], interval: IntervalMethod, *, block: float, seed: int, null_critical: float | None = None
+) -> float:
+    """The empirical rejection rate of the pre-registered rule (`bound > 0`) on zero-mean data: the method's SIZE."""
+    rng = np.random.default_rng(seed)
+    rejected = 0
+    for d in series:
+        bound = lower_bound(
+            d, alpha=SIZE_ALPHA, block=block, reps=SIZE_REPS, rng=rng, interval=interval, null_critical=null_critical
+        )
+        rejected += int(bound > 0.0)
+    return rejected / len(series)
+
+
+def test_the_size_check_chooses_the_first_interval_candidate_that_holds_its_size() -> None:
+    """12.3 / 15.1, the acceptance test of the pre-registered verdict machinery.
+
+    On a zero-mean `d_t` carrying the pre-registered structure (5-session overlap, ~0.85 cross-ETF correlation) the
+    three `interval_candidates` are measured **in order** against the prereg's own `size_rule` budget,
+    `alpha + 2 * sqrt(alpha (1 - alpha) / eval.null_sim_reps)` - not an ad-hoc slack - and the FIRST one that holds its
+    size is the chosen interval, exactly as `eval power` picks `chosen_interval`.
+
+    Two things are asserted about the outcome, and both are the point of the check existing at all:
+
+    * `percentile` - the method `prereg/prereg.v1.toml` currently registers - **does not** hold its size here.  12.3
+      predicts precisely this ("A percentile bound from about 12 effective blocks of a heavy-tailed, cross-correlated,
+      overlapping `d_t` is known to under-cover ... so this is checked, not assumed"), and a `register` that saw this
+      table would refuse the file until `bootstrap.interval` was set to the chosen candidate.
+    * the deliberately mis-sized comparator, the i.i.d. bootstrap (`block = 1`), is detected as over-sized by the
+      same rule.
+    """
+    budget = _size_budget(SIZE_ALPHA, NULL_SIM_REPS)
+    mc_se = math.sqrt(SIZE_ALPHA * (1.0 - SIZE_ALPHA) / NULL_SIM_REPS)
+    assert budget == pytest.approx(0.0597, abs=5e-4)  # the prereg budget at eval.null_sim_reps = 2000
+
+    critical = _null_critical(90210, n=SIZE_N, block=SIZE_BLOCK, alpha=SIZE_ALPHA, sims=4000)
+    series = _null_experiments(4242, n_sims=NULL_SIM_REPS, n=SIZE_N)  # true mean 0: every rejection is a false positive
+
+    sizes: dict[IntervalMethod, float] = {}
+    for seed, method in enumerate(INTERVAL_CANDIDATES):
+        sizes[method] = _rejection_rate(
+            series,
+            method,
+            block=SIZE_BLOCK,
+            seed=7 + seed,
+            null_critical=critical if method == "null_calibrated" else None,
+        )
+    assert tuple(sizes) == INTERVAL_CANDIDATES  # measured in the pre-registered order
+
+    chosen = next((method for method in INTERVAL_CANDIDATES if sizes[method] <= budget), None)
+    assert chosen is not None, f"no interval candidate holds its size: {sizes}"
+    for method in INTERVAL_CANDIDATES[: INTERVAL_CANDIDATES.index(chosen)]:
+        assert sizes[method] > budget, f"{method} was skipped although it holds its size: {sizes}"
+
+    # the chosen method is nominal within Monte-Carlo error ...
+    assert abs(sizes[chosen] - SIZE_ALPHA) <= 3.0 * mc_se, f"chosen {chosen} size {sizes[chosen]}, alpha {SIZE_ALPHA}"
+    # ... and it is NOT the percentile bound the prereg file registers (12.3's "known to under-cover")
+    assert chosen != "percentile", sizes
+    assert sizes["percentile"] > budget, f"percentile size {sizes['percentile']}, budget {budget}"
+
+    # the deliberately mis-sized comparator: the i.i.d. bootstrap ignores the 5-session overlap entirely
+    iid_rate = _rejection_rate(series, "percentile", block=1.0, seed=17)
+    assert iid_rate > budget, f"the i.i.d. bootstrap must be flagged over-sized, got {iid_rate}"
+    assert iid_rate > 3.0 * SIZE_ALPHA, f"the i.i.d. bootstrap should be grossly over-sized, got {iid_rate}"
+    assert iid_rate > sizes["percentile"] + 0.05
+
+    # a method that never rejects would also "hold its size": the chosen one must still see a real effect
+    shifted = _null_experiments(777, n_sims=200, n=SIZE_N, shift=0.35)
+    power = _rejection_rate(
+        shifted, chosen, block=SIZE_BLOCK, seed=19, null_critical=critical if chosen == "null_calibrated" else None
+    )
+    assert power > 0.5, f"chosen {chosen} has no power: {power}"
 
 
 def test_the_bound_has_power_against_a_genuinely_positive_mean() -> None:
@@ -383,6 +473,93 @@ def test_cluster_bootstrap_refuses_a_missing_column_or_a_single_cluster() -> Non
         cluster_bootstrap_ci(frame, "missing", lambda f: 0.0, reps=10, level=0.95, rng=rng)
     with pytest.raises(EvalError):
         cluster_bootstrap_ci(frame, "entry_session", lambda f: 0.0, reps=10, level=0.95, rng=rng)
+
+
+# ======================================================================================================================
+# the finiteness contract (12.1 `missing`): unscorable sessions are excluded and listed, never resampled away
+# ======================================================================================================================
+
+
+def _d_with_one_unscorable_session(seed: int, *, n: int = 200) -> FloatArray:
+    """A `d_t` series with one `NaN` - what `calibration.loss_differential` yields for an all-void session."""
+    d = np.random.default_rng(seed).normal(0.0, 0.01, n)
+    d[int(np.argmin(d))] = np.nan  # the worst session is the one that goes missing: the bias has a direction
+    return np.asarray(d, dtype=np.float64)
+
+
+@pytest.mark.parametrize("interval", ["percentile", "studentised", "null_calibrated"])
+def test_every_interval_method_refuses_a_non_finite_d_t_alike(interval: IntervalMethod) -> None:
+    """The regression test of the silent-filter bug: all three candidates must agree that the data are unusable.
+
+    `loss_differential` yields `NaN` for a session on which a primary question has no usable row, and
+    `eligible_sessions` still calls that session eligible (12.1 defines eligibility on reference availability alone),
+    so such a value really does reach `lower_bound` on the ordinary verdict path.  12.1 `missing` says void outcomes
+    are *excluded and listed*; dropping only the replicates that happen to draw the `NaN` would take the bound over a
+    selection-biased subset of the bootstrap distribution - and would let the three pre-registered interval methods
+    disagree about whether a verdict can be computed at all.
+    """
+    d = _d_with_one_unscorable_session(61)
+    with pytest.raises(EvalError, match="non-finite at positions"):
+        lower_bound(d, alpha=0.05, block=10.0, reps=200, rng=np.random.default_rng(1), interval=interval, null_critical=1.9)
+
+
+def test_the_refusal_names_the_offending_sessions() -> None:
+    d = np.array([0.1, np.nan, 0.2, 0.3, float("inf")], dtype=np.float64)
+    with pytest.raises(EvalError, match=r"non-finite at positions \[1, 4\]"):
+        lower_bound(d, alpha=0.05, block=5.0, reps=50, rng=np.random.default_rng(2), interval="percentile")
+
+
+def test_dropping_the_unscorable_session_changes_the_verdict() -> None:
+    """Why silence was not harmless: the surviving replicates give a different bound from the correct one."""
+    d = _d_with_one_unscorable_session(61)
+    kept = d[np.isfinite(d)]
+    correct = lower_bound(kept, alpha=0.05, block=10.0, reps=2000, rng=np.random.default_rng(3), interval="percentile")
+    # the old behaviour, reproduced by hand: resample the full series and keep only the finite replicate means
+    indices = stationary_bootstrap_indices(d.size, 10.0, 2000, np.random.default_rng(3))
+    draws = d[indices].mean(axis=1)
+    usable = draws[np.isfinite(draws)]
+    assert usable.size < draws.size // 2, "the NaN must poison most replicates for this test to mean anything"
+    biased = float(np.quantile(usable, 0.05))
+    assert abs(biased - correct) > 1e-5, (biased, correct)
+
+
+def test_bootstrap_ci_and_the_paired_interval_refuse_non_finite_series() -> None:
+    rng = np.random.default_rng(63)
+    bad = _d_with_one_unscorable_session(65, n=50)
+    good = rng.normal(0.0, 0.01, 50)
+    with pytest.raises(EvalError, match="non-finite at positions"):
+        bootstrap_ci(bad, block=5.0, reps=50, level=0.95, rng=rng)
+    with pytest.raises(EvalError, match="non-finite at positions"):
+        paired_bootstrap_ci(bad, good, lambda u, v: float(np.mean(u) - np.mean(v)), block=5.0, reps=50, level=0.95, rng=rng)
+    with pytest.raises(EvalError, match="non-finite at positions"):
+        paired_bootstrap_ci(good, bad, lambda u, v: float(np.mean(u) - np.mean(v)), block=5.0, reps=50, level=0.95, rng=rng)
+
+
+def test_a_degenerate_statistic_is_counted_and_refused_by_default() -> None:
+    """With a finite input only the STATISTIC can be undefined; the count is exposed, never silently discarded."""
+    rng = np.random.default_rng(67)
+    x = np.asarray([0.0] * 40 + [1.0] * 10, dtype=np.float64)
+
+    def undefined_without_a_one(values: FloatArray) -> float:
+        return float("nan") if not bool((values == 1.0).any()) else float(values.mean())
+
+    with pytest.raises(EvalError, match="undefined on"):
+        bootstrap_ci(x, undefined_without_a_one, block=20.0, reps=300, level=0.95, rng=np.random.default_rng(69))
+
+    interval = bootstrap_ci(
+        x, undefined_without_a_one, block=20.0, reps=300, level=0.95, rng=rng, max_degenerate_frac=0.9
+    )
+    assert isinstance(interval, Interval)
+    assert interval.reps == 300
+    assert 0 < interval.n_degenerate < 300
+    assert len(interval) == 3 and interval[0] == interval.point  # still the plain 3-tuple of the 12.5 signature
+
+
+def test_the_cluster_bootstrap_refuses_a_non_finite_point_statistic() -> None:
+    rng = np.random.default_rng(71)
+    frame = _trade_frame(rng, clusters=6, per_cluster=3)
+    with pytest.raises(EvalError, match="not finite on the full frame"):
+        cluster_bootstrap_ci(frame, "entry_session", lambda f: float("nan"), reps=10, level=0.95, rng=rng)
 
 
 def test_cluster_bootstrap_one_sided() -> None:

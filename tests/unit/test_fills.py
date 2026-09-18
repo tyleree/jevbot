@@ -262,17 +262,35 @@ def test_band_golden_four_legs_iron_condor() -> None:
     assert net.mid < net.orats < net.worst  # a credit: mid receives the most, worst the least
 
 
-def test_a_ratio_leg_counts_towards_the_leg_class() -> None:
+def test_a_ratio_leg_is_refused_wherever_it_could_be_half_counted() -> None:
+    """2.4: v1 ratios are 1 and `LegFill` carries no ratio field.
+
+    A ratio-2 leg would be counted ONCE in the signed net of 10.3 (`net_of` sums the per-leg prices) and TWICE in the fee of
+    10.7 and the contract counts of 10.4, so `Book.apply`'s `cash[b] -= net[b] * 100 * qty` would book half the cash the mark
+    and the fee assume - and no replay could recover the ratio from the ledger. Every entry point refuses it instead.
+    """
     chain, expiry = base_chain()
     c = at(chain, expiry, Right.CALL, 455)
     chain = plant(chain, {c: (100, 110)})
     model = BandFillModel(CONFIG)
-    single = model.price([order_leg(c, Side.BUY, PositionIntent.BTO)], chain, mandatory=False)[1]
-    doubled = model.price([order_leg(c, Side.BUY, PositionIntent.BTO, ratio=2)], chain, mandatory=False)[1]
-    assert single[0].orats == 108  # one leg class: ceil(10 * 0.75) = 8
-    assert doubled[0].orats == 107  # two leg classes: ceil(10 * 0.66) = 7
-    with pytest.raises(InvariantError):
-        model.price([order_leg(c, Side.BUY, PositionIntent.BTO, ratio=0)], chain, mandatory=False)
+    unit = order_leg(c, Side.BUY, PositionIntent.BTO)
+    net, leg_fills, _ = model.price([unit], chain, mandatory=False)
+    assert (leg_fills[0].orats, net.orats) == (108, 108)  # one leg, one leg class: 100 + ceil(10 * 0.75) = 108
+    assert model.fees_micro([unit], 1, leg_fills) == 40_300  # ... and exactly one contract's fee: ceil(0.0403 * 1e6)
+    for ratio in (2, 3, 0, -1, True):
+        odd = order_leg(c, Side.BUY, PositionIntent.BTO, ratio=ratio)
+        with pytest.raises(InvariantError, match="ratio"):
+            model.price([odd], chain, mandatory=False)
+        with pytest.raises(InvariantError, match="ratio"):
+            model.price([odd], chain, mandatory=True)
+        with pytest.raises(InvariantError, match="ratio"):
+            model.check([odd], 1, chain, mandatory=False)
+        with pytest.raises(InvariantError, match="ratio"):
+            model.fees_micro([odd], 1, leg_fills)  # the leg lists still line up: it is the ratio that is refused
+    # the 10.3 leg class is the NUMBER of legs, not the sum of their ratios
+    other = at(chain, expiry, Right.PUT, 440)
+    two = model.price([unit, sell_to_open(other)], plant(chain, {other: (100, 110)}), mandatory=False)[1]
+    assert two[0].orats == 107  # two legs: 100 + ceil(10 * 0.66) = 107
 
 
 def test_price_refuses_an_empty_or_foreign_order() -> None:
