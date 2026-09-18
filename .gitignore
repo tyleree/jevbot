@@ -1,0 +1,43 @@
+# --- secrets (D29): the real .env never enters git; .env.example lists variable NAMES only -----------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+creds.txt
+
+# --- python / tooling ---------------------------------------------------------------------------------------------------
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+coverage.json
+htmlcov/
+
+# --- run artefacts: the data directory ($JEVBOT_DATA, D1) lives OUTSIDE the repository; these are belt and braces -----
+/jevbot-data/
+/data/
+/runs/
+/logs/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.jsonl.tmp
+*.log
+
+# --- editors / OS -------------------------------------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
