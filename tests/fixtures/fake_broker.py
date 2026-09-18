@@ -48,7 +48,7 @@ from jevbot.types import (
 if TYPE_CHECKING:
     from jevbot.protocols import MarketView
 
-__all__ = ["FAULTS", "FakeBroker", "fill_all", "quote_tape"]
+__all__ = ["FAULTS", "FakeBroker", "quote_tape"]
 
 FAULTS: Final[tuple[str, ...]] = (
     "timeout_after_accept",
@@ -64,7 +64,6 @@ _REJECT_CODES: Final[Mapping[str, tuple[int, int, str]]] = {  # fault -> (http s
     "403_bp": (403, 40310000, "insufficient_buying_power"),
     "422_validation": (422, 42210000, "validation"),
 }
-_MULTIPLIER: Final = 100
 
 
 def quote_tape(chain: object, symbols: Iterable[str]) -> dict[str, tuple[int, int]]:
@@ -110,7 +109,6 @@ class FakeBroker:
     def __post_init__(self) -> None:
         self._orders: dict[str, _Order] = {}
         self._rng = random.Random(self.seed)
-        self._pending_late: list[str] = []
 
     # ------------------------------------------------------------------------------------------------------------------
     # test controls
@@ -132,6 +130,14 @@ class FakeBroker:
         if fault not in FAULTS:
             raise ValueError(f"unknown fault {fault!r}; known: {FAULTS}")
         self.faults.setdefault(call, []).append(fault)
+
+    def force_fill(self, client_order_ids: Sequence[str] = ()) -> None:
+        """Fill every (or the named) working order whatever the tape says - the escape hatch beside `refuse_fills`."""
+        wanted = set(client_order_ids)
+        for cid, record in self._orders.items():
+            if (wanted and cid not in wanted) or record.state.status in TERMINAL_STATUSES:
+                continue
+            self._book(record, record.order.qty - record.state.filled_qty)
 
     def order_state(self, client_order_id: str) -> OrderState | None:
         found = self._orders.get(client_order_id)
@@ -184,7 +190,7 @@ class FakeBroker:
         existing = self._orders.get(order.client_order_id)
         if existing is not None and not self.duplicate_accepted_twice:
             return existing.state  # idempotent on client_order_id (D18): the same order is adopted, never duplicated
-        fault = self._pop_fault("submit")
+        fault = self._pop_fault("submit") or ""
         if fault in _REJECT_CODES:
             status, code, tag = _REJECT_CODES[fault]
             raise BrokerRejected(f"fake broker {fault}", status=status, reject_code=code, tag=tag)
@@ -314,16 +320,6 @@ def _is_option(symbol: str) -> bool:
 
 def _replace(state: OrderState, **changes: object) -> OrderState:
     return msgspec.structs.replace(state, **changes)
-
-
-def fill_all(broker: FakeBroker, client_order_ids: Sequence[str] = ()) -> None:
-    """Force every (or the named) working order to fill, whatever the tape says - the `refuse_fills` escape hatch."""
-    wanted = set(client_order_ids)
-    for cid, record in broker._orders.items():  # noqa: SLF001 - this helper belongs to the fixture
-        if wanted and cid not in wanted:
-            continue
-        if record.state.status not in TERMINAL_STATUSES:
-            broker._book(record, record.order.qty - record.state.filled_qty)  # noqa: SLF001
 
 
 if TYPE_CHECKING:

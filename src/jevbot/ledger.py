@@ -199,21 +199,31 @@ class SqliteLedger:
     # --- construction -------------------------------------------------------------------------------------------------
 
     def _configure(self) -> None:
-        """13.4: WAL + `synchronous=FULL`; foreign keys on; then the schema (idempotent) and a shape check."""
+        """13.4: WAL + `synchronous=FULL`; foreign keys on; then the schema (idempotent) and a shape check.
+
+        A file that is not a run store of this schema is refused before anything is written to it."""
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.executescript(SCHEMA_SQL)
+        if self._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ledger'").fetchone():
+            self._check_ledger_shape()
+        try:
+            self._conn.executescript(SCHEMA_SQL)
+        except sqlite3.DatabaseError as exc:
+            raise LedgerCorrupt(f"{self.path}: the run store schema of 13.4 could not be applied ({exc})") from exc
         self._conn.commit()
-        columns = tuple(str(row[1]) for row in self._conn.execute("PRAGMA table_info(ledger)"))
-        if columns != _LEDGER_COLUMNS:
-            raise LedgerCorrupt(f"{self.path}: `ledger` has columns {columns}, expected {_LEDGER_COLUMNS} (13.4)")
+        self._check_ledger_shape()
         version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
         if version == 0:
             self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
         elif version != _SCHEMA_VERSION:
             raise LedgerCorrupt(f"{self.path}: run store schema version {version}, this build writes {_SCHEMA_VERSION}")
+
+    def _check_ledger_shape(self) -> None:
+        columns = tuple(str(row[1]) for row in self._conn.execute("PRAGMA table_info(ledger)"))
+        if columns != _LEDGER_COLUMNS:
+            raise LedgerCorrupt(f"{self.path}: `ledger` has columns {columns}, expected {_LEDGER_COLUMNS} (13.4)")
 
     def _read_head(self) -> tuple[int, str]:
         row = self._conn.execute("SELECT seq, hash FROM ledger ORDER BY seq DESC LIMIT 1").fetchone()

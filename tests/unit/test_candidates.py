@@ -11,7 +11,7 @@ furthest-OTM one that fits, and the short leg never moves.
 """
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any, Final
 
 import pandas as pd
@@ -625,7 +625,17 @@ def test_eligible_is_the_structmath_filter() -> None:
     assert crossed.occ not in kept and thin.occ not in kept and wide.occ not in kept
     assert contract_at(hurt, expiry, Right.PUT, 432_000).occ in kept
     assert list(eligible.columns) == list(chain.table.columns)
-    assert len(eligible) == len(hurt.table) - 3
+    # the kept set of one expiry, recomputed here row by row straight from `structmath`
+    rows = hurt.table[hurt.table["expiry"] == pd.Timestamp(expiry)]
+    expected = {
+        str(row.occ)
+        for row in rows.itertuples()
+        if not structmath.leg_liquidity_rejects(
+            quote_of(hurt, contract_at(hurt, expiry, Right(row.right), int(row.strike_milli))), sold=True, cfg=cfg.liquidity
+        )
+    }
+    assert set(eligible[eligible["expiry"] == pd.Timestamp(expiry)]["occ"]) == expected
+    assert 0 < len(expected) < len(rows)  # far-OTM rows below the 10-cent sold-bid floor are dropped
     # a bought leg accepts a 1-cent bid, a sold leg needs 10
     cheap = chain.table[chain.table["bid"].between(1, 9)]
     if not cheap.empty:
@@ -641,17 +651,26 @@ def test_an_illiquid_short_strike_is_stepped_over_not_traded() -> None:
     assert candidate.rejects == ()  # the traded legs are always drawn from eligible rows
 
 
-def test_the_default_credit_and_debit_floors_are_feasible() -> None:
-    """Section 8 / section 4: the shipped `[candidates]` ratio bounds must not reject the structures the deltas produce."""
-    for chain in (make_chain(), six_hundred_dollar_chain(), make_chain("IWM", spot=10_000)):
+def test_the_default_credit_and_debit_floors_are_feasible_on_the_factory_chains() -> None:
+    """Section 8: the shipped `[candidates]` ratio bounds must not reject what the delta targets produce on the two
+    factory chains the test plan names ($450 and the $600-priced budget-fit chain)."""
+    for chain in (make_chain(), six_hundred_dollar_chain()):
         for kind in ALL_KINDS:
-            result = generator().build(
-                kind, view_of(chain), "SPY" if chain.underlying == "SPY" else chain.underlying, budget_floor=DEFAULT_FLOOR
-            )
-            if isinstance(result, CandidateReject):
-                assert result.rejects == ("exceeds_risk_budget",), (chain.underlying, chain.spot, kind, result.rejects)
-                continue
-            assert result.rejects == (), (chain.underlying, chain.spot, kind, result.rejects)
+            result = generator().build(kind, view_of(chain), "SPY", budget_floor=DEFAULT_FLOOR)
+            assert isinstance(result, Candidate), (chain.spot, kind, result)
+            assert result.rejects == (), (chain.spot, kind, result.rejects)
+            assert result.max_loss_per_contract <= DEFAULT_FLOOR
+
+
+def test_a_cheap_underlying_surfaces_the_credit_floor_instead_of_trading_it() -> None:
+    """On a $100 chain the 0.25 / 0.12 wing is one strike wide and prices below `min_credit_to_width`: the structure is
+    priced and REJECTED (`credit_to_width`), which is exactly what `data scan-candidates` is there to reveal (section 8)."""
+    chain = make_chain("IWM", spot=10_000)
+    result = built(generator().build(StructureKind.PUT_CREDIT, view_of(chain), "IWM", budget_floor=DEFAULT_FLOOR))
+    assert result.structure.width == 100  # one $1 strike
+    assert abs(result.net.orats) * 100 < CandidatesConfig().min_credit_to_width * result.structure.width * 100
+    assert result.rejects == ("credit_to_width",)
+    assert result.max_loss_per_contract > 0  # the economics are valid, only the floor is missed
 
 
 @pytest.mark.parametrize(
@@ -676,7 +695,8 @@ def test_the_ex_dividend_entry_block() -> None:
     chain = make_chain()
     itm_short = cfg_with(candidates=CandidatesConfig(credit_short_delta=0.70, credit_short_min_em=0.0, max_width_pct_spot=0.20))
     ex_date = date(2024, 6, 14)
-    event = ex_dividend_event("SPY", ex_date, 150)
+    known_at = datetime(2024, 5, 1, tzinfo=UTC)  # verified well before the decision snapshot (INV-14)
+    event = ex_dividend_event("SPY", ex_date, 150, knowable_at=known_at)
     assert chain.key.session <= ex_date <= date(2024, 6, 21)
     blocked = built(generator(itm_short).build(StructureKind.CALL_CREDIT, view_of(chain, events=[event]), "SPY", budget_floor=10_000_000))
     short_call = short_strikes(blocked.structure)[0]
@@ -688,7 +708,7 @@ def test_the_ex_dividend_entry_block() -> None:
     assert puts.rejects == ()  # no short call, no block
     otm = built(generator().build(StructureKind.CALL_CREDIT, view_of(chain, events=[event]), "SPY", budget_floor=DEFAULT_FLOOR))
     assert otm.rejects == ()  # the 0.25-delta short call is far above spot + dividend
-    far = ex_dividend_event("SPY", date(2024, 7, 12), 150)  # beyond last_session
+    far = ex_dividend_event("SPY", date(2024, 7, 12), 150, knowable_at=known_at)  # beyond last_session
     assert (
         "exdiv_short_call"
         not in built(

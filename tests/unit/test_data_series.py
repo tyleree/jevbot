@@ -51,19 +51,24 @@ def bars_table(cal: XnysCalendar) -> PitTable:
     return PitTable(bars_frame(cal), name="bars:SPY", key="session", column_knowable=BARS_COLUMN_KNOWABLE, paths=["pq/bars/alpaca/SPY.parquet"])
 
 
-def daily_frame(cal: XnysCalendar, *, recorded_close: bool = True) -> pd.DataFrame:
-    """Two sessions x two slots: `close_c` lives on the `eod` row only (5.4)."""
+def daily_frame(cal: XnysCalendar, *, close_gate: str = "snapshot") -> pd.DataFrame:
+    """Two sessions x two slots: `close_c` lives on the `eod` row only (5.4).
+
+    `close_gate` is when the close becomes knowable: `snapshot` (mirror: the snapshot time IS the close), `next_open`
+    (paper: `record_close` fills it the next morning) or `none` (not recorded yet).
+    """
     rows: list[dict[str, object]] = []
     for session in SESSIONS[:2]:
         for slot in (Slot.DEC, Slot.EOD):
             eod = slot is Slot.EOD
+            gate = {"snapshot": closes(cal, session), "next_open": cal.next_open_after(closes(cal, session)), "none": None}[close_gate]
             rows.append(
                 {
                     "session": pd.Timestamp(session),
                     "slot": slot.value,
                     "px_c": 45_000 if eod else 44_990,
                     "close_c": 45_000 if eod else None,
-                    "close_knowable_at": (closes(cal, session) if recorded_close else None) if eod else None,
+                    "close_knowable_at": gate if eod else None,
                     "knowable_at": closes(cal, session) - timedelta(minutes=0 if eod else 25),
                 }
             )
@@ -74,8 +79,8 @@ def daily_frame(cal: XnysCalendar, *, recorded_close: bool = True) -> pd.DataFra
     return frame
 
 
-def daily_table(cal: XnysCalendar, *, recorded_close: bool = True) -> PitTable:
-    return PitTable(daily_frame(cal, recorded_close=recorded_close), name="daily:SPY", key=DAILY_KEY, column_knowable=DAILY_COLUMN_KNOWABLE)
+def daily_table(cal: XnysCalendar, *, close_gate: str = "snapshot") -> PitTable:
+    return PitTable(daily_frame(cal, close_gate=close_gate), name="daily:SPY", key=DAILY_KEY, column_knowable=DAILY_COLUMN_KNOWABLE)
 
 
 # ======================================================================================================================
@@ -200,10 +205,25 @@ def test_close_c_is_gated_by_its_own_timestamp_and_only_exists_on_eod_rows(cal: 
     # the dec row of the same session carries no close at all - unavailable, never a PIT violation
     with pytest.raises(DataUnavailable, match="has not been recorded yet"):
         table.value((session, Slot.DEC), "close_c", closes(cal, session))
-    # the gated column comes back NULL through asof() and row() rather than raising
-    gated = table.asof(decision)
-    assert gated[gated["slot"] == Slot.EOD.value]["close_c"].isna().all()
-    assert pd.isna(table.row((SESSIONS[0], Slot.EOD), decision)["close_c"]) is False  # the PREVIOUS session's close is knowable
+    # the PREVIOUS session's close is knowable at this decision
+    assert not pd.isna(table.row((SESSIONS[0], Slot.EOD), decision)["close_c"])
+    assert table.value((SESSIONS[0], Slot.EOD), "close_c", decision) == 45_000
+
+
+def test_the_column_gate_hides_a_close_that_the_row_itself_already_carries(cal: XnysCalendar) -> None:
+    """Paper (5.4): the `eod` snapshot row appears at close + 2 min, its official `close_c` only the next morning. The row
+    is readable, the column is not - which is exactly what a second, column-level gate buys."""
+    table = daily_table(cal, close_gate="next_open")
+    session = SESSIONS[1]
+    at_close = closes(cal, session)
+    row = table.row((session, Slot.EOD), at_close)
+    assert int(row["px_c"]) == 45_000 and pd.isna(row["close_c"])  # the row is visible, the close is not
+    visible = table.asof(at_close)
+    eod_today = visible[(visible["session"] == pd.Timestamp(session)) & (visible["slot"] == Slot.EOD.value)]
+    assert len(eod_today) == 1 and eod_today["close_c"].isna().all()
+    with pytest.raises(PitViolation, match="close_c"):
+        table.value((session, Slot.EOD), "close_c", at_close)
+    assert table.value((session, Slot.EOD), "close_c", cal.next_open_after(at_close)) == 45_000
 
 
 def test_a_null_value_behind_a_satisfied_gate_is_unavailable(cal: XnysCalendar) -> None:
@@ -218,7 +238,7 @@ def test_a_null_value_behind_a_satisfied_gate_is_unavailable(cal: XnysCalendar) 
 
 def test_a_close_that_was_never_recorded_is_unavailable_not_a_violation(cal: XnysCalendar) -> None:
     """Paper: the `eod` row exists from the snapshot, `record_close` fills the close next morning (5.4)."""
-    table = daily_table(cal, recorded_close=False)
+    table = daily_table(cal, close_gate="none")
     with pytest.raises(DataUnavailable, match="has not been recorded yet"):
         table.value((SESSIONS[1], Slot.EOD), "close_c", closes(cal, SESSIONS[1]) + timedelta(days=30))
     assert table.asof(closes(cal, SESSIONS[1]))["close_c"].isna().all()
@@ -229,7 +249,7 @@ def test_knowable_at_reports_the_effective_gate_without_checking_it(cal: XnysCal
     key = (SESSIONS[1], Slot.EOD)
     assert table.knowable_at(key) == closes(cal, SESSIONS[1])
     assert table.knowable_at(key, "close_c") == closes(cal, SESSIONS[1])
-    assert daily_table(cal, recorded_close=False).knowable_at(key, "close_c") is None
+    assert daily_table(cal, close_gate="none").knowable_at(key, "close_c") is None
     assert bars_table(cal).knowable_at(SESSIONS[0], "close") == cal.next_open_after(closes(cal, SESSIONS[0]))
 
 

@@ -228,7 +228,23 @@ _PERIOD_RE: Final = re.compile(r"\bQ[1-4]\b|\bFY\s?\d{2,4}\b|\b[1-4]Q\b|\bH[12]\
 _ORDINAL_RE: Final = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)\b", re.IGNORECASE)
 _SINCE_RE: Final = re.compile(rf"\bsince {re.escape(MASK_MONTH)}(?: {re.escape(MASK_YEAR)})?", re.IGNORECASE)
 _RECORD_RE: Final = re.compile(r"\brecord (?:high|low)\b|\ball-time\b", re.IGNORECASE)
-_REPEATED_LEVEL_RE: Final = re.compile(rf"{re.escape(MASK_LEVEL)}(?:\s+{re.escape(MASK_LEVEL)})+")
+_repeat_cache: dict[str, tuple[tuple[re.Pattern[str], str], ...]] = {}
+
+
+def _collapse_repeats(text: str, terms: MaskTerms) -> str:
+    """Two adjacent copies of the SAME replacement phrase are one entity to a reader ("a large company a large company"
+    from `Apple (NASDAQ: AAPL)`, "a notable level a notable level" from `record high since [month]`). Collapsing them
+    keeps the sentence readable and keeps `mask` idempotent."""
+    patterns = _repeat_cache.get(terms.version)
+    if patterns is None:
+        phrases = sorted({*terms.replacements.values(), MASK_LEVEL})
+        patterns = tuple((re.compile(rf"{re.escape(phrase)}(?:\s+{re.escape(phrase)})+"), phrase) for phrase in phrases)
+        _repeat_cache[terms.version] = patterns
+    for pattern, phrase in patterns:
+        text = pattern.sub(phrase, text)
+    return text
+
+
 _BASIS_POINTS_RE: Final = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:basis points?|bps|bp)\b", re.IGNORECASE)
 _PERCENT_RE: Final = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(?:%|percent\b|pct\b)", re.IGNORECASE)
 _NUMBER_RE: Final = re.compile(r"\$?\d[\d,]*(?:\.\d+)?")
@@ -357,12 +373,12 @@ def mask(text: str, terms: MaskTerms, *, symbols: Sequence[str] = ()) -> str:
     out = _ORDINAL_RE.sub(MASK_DAY, out)
     out = _SINCE_RE.sub(MASK_LEVEL, out)
     out = _RECORD_RE.sub(MASK_LEVEL, out)
-    out = _REPEATED_LEVEL_RE.sub(MASK_LEVEL, out)  # "record high since [month]" is ONE notable level, not two
     # numbers (Jev is weak at them): basis points, then percentages, then everything else
     out = _BASIS_POINTS_RE.sub(f"{MASK_NUMBER} basis points", out)
     out = _PERCENT_RE.sub(_magnitude, out)
     out = _NUMBER_RE.sub(MASK_NUMBER, out)
     out = _mask_proper_nouns(out)
+    out = _collapse_repeats(out, terms)  # "record high since [month]" is ONE notable level, "Apple (NASDAQ: AAPL)" ONE company
     return _SPACES_RE.sub(" ", out).strip()
 
 

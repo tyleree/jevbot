@@ -387,6 +387,68 @@ def test_the_store_creates_its_run_directory_and_refuses_a_foreign_path(tmp_path
         SqliteLedger(42)  # type: ignore[arg-type]
 
 
+def test_a_foreign_or_newer_store_is_refused(tmp_path: Path) -> None:
+    foreign = tmp_path / "foreign.sqlite"
+    connection = raw(foreign)
+    try:
+        connection.execute("CREATE TABLE ledger (seq INTEGER PRIMARY KEY, stuff TEXT)")
+    finally:
+        connection.close()
+    with pytest.raises(LedgerCorrupt, match="expected"):
+        SqliteLedger(foreign)
+
+    newer = tmp_path / "newer.sqlite"
+    with SqliteLedger(newer) as store:
+        store.append(LedgerKind.MARK, SESSION, AS_OF, {"i": 1})
+    connection = raw(newer)
+    try:
+        connection.execute("PRAGMA user_version=99")
+    finally:
+        connection.close()
+    with pytest.raises(LedgerCorrupt, match="schema version 99"):
+        SqliteLedger(newer)
+
+
+def test_reading_a_tampered_row_raises_instead_of_handing_out_nonsense(store_path: Path) -> None:
+    with SqliteLedger(store_path) as store:
+        marks(store, 2)
+    drop_triggers(store_path)
+    connection = raw(store_path)
+    try:
+        connection.execute("UPDATE ledger SET kind = ? WHERE seq = 2", ("mark_of_zorro",))
+    finally:
+        connection.close()
+    with SqliteLedger(store_path) as store, pytest.raises(LedgerCorrupt, match="seq 2"):
+        list(store.entries())
+
+
+def test_verify_reports_a_predecessor_that_is_gone(store_path: Path) -> None:
+    with SqliteLedger(store_path) as store:
+        marks(store, 4)
+    drop_triggers(store_path)
+    connection = raw(store_path)
+    try:
+        connection.execute("DELETE FROM ledger WHERE seq = 2")
+    finally:
+        connection.close()
+    with SqliteLedger(store_path) as store:
+        with pytest.raises(LedgerCorrupt, match="position 2"):
+            store.verify(from_seq=3)  # the incremental check cannot link to an entry that is no longer there
+        with pytest.raises(LedgerCorrupt, match="seq gap"):
+            store.verify()
+
+
+def test_a_nonsense_verification_marker_is_corruption(ledger: SqliteLedger) -> None:
+    marks(ledger, 1)
+    connection = raw(ledger.path)
+    try:
+        connection.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (LAST_VERIFIED_SEQ, "not a number"))
+    finally:
+        connection.close()
+    with pytest.raises(LedgerCorrupt, match=LAST_VERIFIED_SEQ):
+        _ = ledger.last_verified_seq
+
+
 # ======================================================================================================================
 # Fill claims, states and meta
 # ======================================================================================================================
@@ -474,6 +536,26 @@ def test_sidecar_is_stored_beside_the_rows_and_never_hashed(store_path: Path, tm
         assert with_sidecar.head()[1] == plain.append(LedgerKind.DECISION, SESSION, AS_OF, payload).hash
         with pytest.raises(TypeError):
             with_sidecar.append(LedgerKind.DECISION, SESSION, AS_OF, payload, sidecar={"wall_created_at": 5})
+
+
+def test_every_sidecar_shape_lands_in_the_three_columns(ledger: SqliteLedger) -> None:
+    payload = {"decision_id": "d1"}
+    shapes: list[tuple[dict[str, Any], Any, Any]] = [
+        ({"provenance": {"state_sha256": "ab"}}, {"state_sha256": "ab"}, None),  # provenance only
+        ({"diagnostics": {"a": 1}}, None, {"a": 1}),  # diagnostics only
+        ({"diagnostics": {"a": 1}, "b": 2}, None, {"a": 1, "b": 2}),  # a diagnostics mapping absorbs the loose keys
+        ({"diagnostics": "a note", "b": 2}, None, {"diagnostics": "a note", "b": 2}),  # ... and so does a bare value
+        ({"ledgered_wall": AS_OF}, None, None),  # the 2.7 Provenance field name for the wall clock
+        ({"wall_created_at": "whenever"}, None, None),  # a text is taken as it is
+    ]
+    for index, (sidecar, provenance, diagnostics) in enumerate(shapes, start=1):
+        ledger.append(LedgerKind.DECISION, SESSION, AS_OF, payload, sidecar=sidecar)
+        stored = ledger.sidecar(index)
+        assert stored is not None
+        assert stored["provenance"] == provenance and stored["diagnostics"] == diagnostics
+    assert ledger.sidecar(5)["wall_created_at"] == "2024-05-17T20:00:00Z"  # type: ignore[index]
+    assert ledger.sidecar(6)["wall_created_at"] == "whenever"  # type: ignore[index]
+    ledger.verify()
 
 
 # ======================================================================================================================
