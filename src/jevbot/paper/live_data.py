@@ -93,7 +93,7 @@ def fetch_cboe_index(sym: str) -> pd.Series:
         value = row.get("CLOSE") or row.get(sym)
         if not value:
             continue
-        out[pd.Timestamp(datetime.strptime(row["DATE"], "%m/%d/%Y").date())] = float(value)
+        out[pd.Timestamp(datetime.strptime(row["DATE"], "%m/%d/%Y").date())] = float(value)  # noqa: DTZ007 - only the date is kept
     if not out:
         raise DataUnavailable(f"cboe: empty history for {sym}")
     return pd.Series(out).sort_index()
@@ -104,7 +104,7 @@ def fetch_bill_rate(today: date) -> float:
     for year in (today.year, today.year - 1):
         rows = list(csv.DictReader(io.StringIO(_get(_TREASURY.format(year=year)))))
         values = [(r["Date"], r.get("13 WEEKS COUPON EQUIVALENT")) for r in rows]
-        dated = sorted((datetime.strptime(d, "%m/%d/%Y").date(), float(v)) for d, v in values if v)
+        dated = sorted((datetime.strptime(d, "%m/%d/%Y").date(), float(v)) for d, v in values if v)  # noqa: DTZ007 - only the date is kept
         dated = [(d, v) for d, v in dated if d < today]  # EOD series: usable from the next session
         if dated:
             return dated[-1][1] / 100.0
@@ -129,7 +129,7 @@ def _raw_chain(snaps: dict[str, Any]) -> pd.DataFrame:
         rows.append(
             {
                 "occ": occ,
-                "expiry": np.datetime64(datetime.strptime(tail[:6], "%y%m%d").date(), "ns"),
+                "expiry": np.datetime64(datetime.strptime(tail[:6], "%y%m%d").date(), "ns"),  # noqa: DTZ007 - only the date is kept
                 "right": tail[6],
                 "strike_milli": int(tail[7:]),
                 "bid": bid,
@@ -244,9 +244,9 @@ def _spot(quote: Any, trade: Any) -> Cents:
     if quote is not None and quote.bid_price and quote.ask_price and 0 < quote.bid_price <= quote.ask_price:
         mid = (quote.bid_price + quote.ask_price) / 2.0
         if trade is None or not trade.price or abs(mid / trade.price - 1.0) < 0.01:
-            return int(round(mid * 100))
+            return round(float(mid) * 100)
     if trade is not None and trade.price:
-        return int(round(trade.price * 100))
+        return round(float(trade.price) * 100)
     raise DataUnavailable("alpaca: no usable underlying quote or trade")
 
 

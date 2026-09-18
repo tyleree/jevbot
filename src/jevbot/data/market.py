@@ -142,7 +142,12 @@ def _bars_table(underlying: str, closes: pd.Series, calendar: "Calendar") -> Pit
     )
     for column in ("knowable_at", "open_knowable_at", "hlcv_knowable_at"):
         frame[column] = pd.to_datetime(frame[column], utc=True)
-    return PitTable(frame, name=bars_table_name(underlying), key="session", column_knowable={"high": "hlcv_knowable_at", "low": "hlcv_knowable_at", "close": "hlcv_knowable_at"})
+    return PitTable(
+        frame,
+        name=bars_table_name(underlying),
+        key="session",
+        column_knowable={"high": "hlcv_knowable_at", "low": "hlcv_knowable_at", "close": "hlcv_knowable_at"},
+    )
 
 
 # ======================================================================================================================
@@ -178,9 +183,7 @@ def _chain_daily_row(chain: ChainSnapshot, calendar: "Calendar") -> dict[str, An
     return row
 
 
-def _proxy_rows(
-    proxy: pd.Series, closes: pd.Series, rv_series: pd.Series, before: date, calendar: "Calendar"
-) -> list[dict[str, Any]]:
+def _proxy_rows(proxy: pd.Series, closes: pd.Series, rv_series: pd.Series, before: date, calendar: "Calendar") -> list[dict[str, Any]]:
     """V10 back-fill rows: one `eod` row per proxy session strictly before `before`, knowable at the next open."""
     rows: list[dict[str, Any]] = []
     for raw_session, iv_bp in proxy.items():
@@ -266,9 +269,7 @@ def _json_dumps(term: list[tuple[float, float, int, int, int]]) -> str:
 def _volidx_table(name: str, series: pd.Series, calendar: "Calendar") -> PitTable:
     sessions = [pd.Timestamp(s).date() for s in series.index]
     knowable = [pd.Timestamp(calendar.next_open_after(calendar.open_close(s)[1])) for s in sessions]
-    frame = pd.DataFrame(
-        {"session": pd.to_datetime(sessions), "close": series.to_numpy(dtype="float64"), "knowable_at": knowable}
-    )
+    frame = pd.DataFrame({"session": pd.to_datetime(sessions), "close": series.to_numpy(dtype="float64"), "knowable_at": knowable})
     frame["knowable_at"] = pd.to_datetime(frame["knowable_at"], utc=True)
     return PitTable(frame, name=volidx_table_name(name), key="session")
 
