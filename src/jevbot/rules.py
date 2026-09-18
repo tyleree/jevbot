@@ -537,14 +537,14 @@ class DecisionRules:
         tier = min(tier_s, tier_peak, tier_env)
         ev.tier_ppm = _ppm(tier)
         if tier <= 0.0:
+            # without a mapped structure the score tier is undefined: step 5 / the gates already carry the reason, and no
+            # `tier:zero:score` is invented for a decision that never reached the composite.
             if kind is not None and tier_s <= 0.0:
                 ev.reasons.append("tier:zero:score")
             if tier_peak <= 0.0:
                 ev.reasons.append("tier:zero:peak")
             if tier_env <= 0.0:
                 ev.reasons.append("tier:zero:env")
-            if kind is None and tier_peak > 0.0 and tier_env > 0.0:
-                pass  # no structure: the score tier is undefined and the gates already carry the reason
         return ev
 
     # ------------------------------------------------------------------------------------------------------------------

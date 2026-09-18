@@ -408,9 +408,13 @@ def calibration_frame(stores: StoreArg | Sequence[StoreArg], *, resolved_only: b
     if not parts:
         return _empty(CALIBRATION_COLUMNS)
     frame = pd.concat(parts, ignore_index=True)
-    ordered = [column for column in CALIBRATION_COLUMNS if column in frame.columns]
-    rest = [column for column in frame.columns if column not in ordered]
-    return frame[ordered + rest]
+    # every contract column is present even when a store held none of those rows, and always in the documented order:
+    # a consumer may index by name without asking which loader produced the frame
+    for column in CALIBRATION_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = pd.NA
+    rest = [column for column in frame.columns if column not in CALIBRATION_COLUMNS]
+    return frame[[*CALIBRATION_COLUMNS, *rest]]
 
 
 def reference_history(store: StoreArg) -> pd.DataFrame:

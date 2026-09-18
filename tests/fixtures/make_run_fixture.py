@@ -101,15 +101,18 @@ PRIMARY_FAMILY: tuple[str, ...] = (
 )
 FIXTURE_QUESTIONS: tuple[str, ...] = (*PRIMARY_FAMILY, "eval.up_1s")
 
-# Enough per-question structure that a reference or a calibration curve has something to find.
-_QUESTION_KIND: dict[str, str] = {
-    "eval.down_1em_1s": "close_lt",
-    "eval.up_1em_1s": "close_gt",
-    "eval.inside_1em_1s": "close_inside",
-    "eval.down_1em_5s": "close_lt",
-    "eval.up_1em_5s": "close_gt",
-    "eval.inside_1em_5s": "close_inside",
-    "eval.up_1s": "close_gt",
+# Per question: the outcome kind and its integer thresholds (6.4). They must DIFFER between questions of the same
+# horizon: `event_key` is a hash of (underlying, snapshot key, spec), so two questions with an identical spec would
+# share one event - which is the point of the key for a reference, and a bug in a fixture.
+REF_CENTS = 45_000
+_QUESTION_SPEC: dict[str, tuple[str, int | None, int | None]] = {
+    "eval.down_1em_1s": ("close_lt", 44_100, None),
+    "eval.up_1em_1s": ("close_gt", None, 45_900),
+    "eval.inside_1em_1s": ("close_inside", 44_100, 45_900),
+    "eval.down_1em_5s": ("close_lt", 43_700, None),
+    "eval.up_1em_5s": ("close_gt", None, 46_300),
+    "eval.inside_1em_5s": ("close_inside", 43_700, 46_300),
+    "eval.up_1s": ("close_gt", None, REF_CENTS),  # 6.4: `close > ref`, no expected-move band
 }
 # latent "true" probability of each question, and the risk premium the option-implied probability carries on it
 _TRUE_P: dict[str, float] = {
@@ -248,6 +251,16 @@ def _sessions(start: date, count: int) -> tuple[date, ...]:
             out.append(day)
         day += timedelta(days=1)
     return tuple(out)
+
+
+def _weekday_after(day: date, count: int) -> date:
+    """`count` weekdays after `day` - used for the resolve session of a forecast made near the end of the run."""
+    out = day
+    for _ in range(count):
+        out += timedelta(days=1)
+        while out.weekday() >= 5:
+            out += timedelta(days=1)
+    return out
 
 
 def _close(session: date) -> datetime:
@@ -644,17 +657,16 @@ def _write_forecasts(writer: _Writer, state: _RunState, session: date, as_of: da
     for question_id in spec.questions:
         horizon = question_horizon(question_id)
         resolve_index = index + horizon
-        if resolve_index >= len(state.sessions):
-            continue
-        resolve_on = state.sessions[resolve_index]
-        spec_obj = OutcomeSpec(
-            kind=_QUESTION_KIND[question_id],
-            horizon_sessions=horizon,
-            resolve_on=resolve_on,
-            ref=45_000,
-            lo=44_100 if _QUESTION_KIND[question_id] in ("close_lt", "close_inside") else None,
-            hi=45_900 if _QUESTION_KIND[question_id] in ("close_gt", "close_inside") else None,
+        # forecasts made near the end of the run stay OPEN: they have a real spec and a real resolve session, but no
+        # OUTCOME entry yet. A report must count them as open, never as missing (12.3 "N resolved / open / void").
+        resolves_inside_run = resolve_index < len(state.sessions)
+        resolve_on = (
+            state.sessions[resolve_index]
+            if resolves_inside_run
+            else _weekday_after(state.sessions[-1], resolve_index - len(state.sessions) + 1)
         )
+        kind, lo, hi = _QUESTION_SPEC[question_id]
+        spec_obj = OutcomeSpec(kind=kind, horizon_sessions=horizon, resolve_on=resolve_on, ref=REF_CENTS, lo=lo, hi=hi)
         event_key = ids.event_key(underlying, key, spec_obj)
         true_p = float(np.clip(_TRUE_P[question_id] + 0.03 * float(state.rng.standard_normal()), 0.02, 0.98))
         implied_p = float(np.clip(true_p + _PREMIUM[question_id], 0.01, 0.99))
@@ -706,6 +718,8 @@ def _write_forecasts(writer: _Writer, state: _RunState, session: date, as_of: da
             state.n_forecasts += 1
             if missing:
                 state.n_missing += 1
+        if not resolves_inside_run:
+            continue
         state.pending_outcomes.setdefault(resolve_index, []).append(
             {
                 "event_key": event_key,
@@ -1166,14 +1180,8 @@ def make_reference_history_store(
                 if index + horizon >= len(sessions):
                     continue
                 resolve_on = sessions[index + horizon]
-                spec_obj = OutcomeSpec(
-                    kind=_QUESTION_KIND[question_id],
-                    horizon_sessions=horizon,
-                    resolve_on=resolve_on,
-                    ref=45_000,
-                    lo=44_100 if _QUESTION_KIND[question_id] in ("close_lt", "close_inside") else None,
-                    hi=45_900 if _QUESTION_KIND[question_id] in ("close_gt", "close_inside") else None,
-                )
+                kind, lo, hi = _QUESTION_SPEC[question_id]
+                spec_obj = OutcomeSpec(kind=kind, horizon_sessions=horizon, resolve_on=resolve_on, ref=REF_CENTS, lo=lo, hi=hi)
                 event_key = ids.event_key(underlying, key, spec_obj)
                 true_p = float(np.clip(_TRUE_P[question_id] + 0.03 * float(rng.standard_normal()), 0.02, 0.98))
                 implied_p = float(np.clip(true_p + _PREMIUM[question_id], 0.01, 0.99))

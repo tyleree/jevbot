@@ -277,7 +277,11 @@ def test_decision_reasons_never_carry_a_post_decision_code() -> None:
     """7.9: `EntryDecision.reasons` is a pure function of answers + facts; candidate / risk / gate codes live in RISK_VERDICT."""
     cases = [
         decide(rules(), core_answers(), facts()),
-        decide(rules(), core_answers(regime__market=choice("regime.market", {"disorderly_selloff": 0.9, "unclear_or_transition": 0.1})), facts()),
+        decide(
+            rules(),
+            core_answers(regime__market=choice("regime.market", {"disorderly_selloff": 0.9, "unclear_or_transition": 0.1})),
+            facts(),
+        ),
         decide(rules(), core_answers(), facts(trend_code="down")),
         decide(rules(), core_answers(risk__environment=score((0.0, 0.0, 0.0, 1.0))), facts()),
     ]
@@ -299,13 +303,21 @@ def _no_trade_steps() -> list[tuple[str, dict[str, Any], dict[str, Any], str]]:
     return [
         (
             "step2 regime disorderly_selloff",
-            {"regime__market": choice("regime.market", {"disorderly_selloff": 0.70, "orderly_downtrend": 0.20, "unclear_or_transition": 0.10})},
+            {
+                "regime__market": choice(
+                    "regime.market", {"disorderly_selloff": 0.70, "orderly_downtrend": 0.20, "unclear_or_transition": 0.10}
+                )
+            },
             {},
             "veto:regime:disorderly_selloff",
         ),
         (
             "step2 regime unclear",
-            {"regime__market": choice("regime.market", {"unclear_or_transition": 0.70, "trending_up_calm": 0.20, "range_bound_calm": 0.10})},
+            {
+                "regime__market": choice(
+                    "regime.market", {"unclear_or_transition": 0.70, "trending_up_calm": 0.20, "range_bound_calm": 0.10}
+                )
+            },
             {},
             "veto:regime:unclear_or_transition",
         ),
@@ -317,19 +329,31 @@ def _no_trade_steps() -> list[tuple[str, dict[str, Any], dict[str, Any], str]]:
         ),
         (
             "step3 direction conflicting",
-            {"under__direction": choice("under.direction", {"conflicting_signals": 0.70, "bullish": 0.20, "bearish": 0.05, "neutral_range": 0.05})},
+            {
+                "under__direction": choice(
+                    "under.direction", {"conflicting_signals": 0.70, "bullish": 0.20, "bearish": 0.05, "neutral_range": 0.05}
+                )
+            },
             {},
             "gate:direction:conflicting",
         ),
         (
             "step3 direction p_top",
-            {"under__direction": choice("under.direction", {"bullish": 0.59, "bearish": 0.01, "neutral_range": 0.20, "conflicting_signals": 0.20})},
+            {
+                "under__direction": choice(
+                    "under.direction", {"bullish": 0.59, "bearish": 0.01, "neutral_range": 0.20, "conflicting_signals": 0.20}
+                )
+            },
             {},
             "gate:direction:p_top",
         ),
         (
             "step3 direction margin",
-            {"under__direction": choice("under.direction", {"bullish": 0.60, "bearish": 0.40, "neutral_range": 0.0, "conflicting_signals": 0.0})},
+            {
+                "under__direction": choice(
+                    "under.direction", {"bullish": 0.60, "bearish": 0.40, "neutral_range": 0.0, "conflicting_signals": 0.0}
+                )
+            },
             {},
             "gate:direction:margin",
         ),
@@ -354,8 +378,12 @@ def _no_trade_steps() -> list[tuple[str, dict[str, Any], dict[str, Any], str]]:
         (
             "step5 no structure (neutral_range + buy_premium)",
             {
-                "under__direction": choice("under.direction", {"neutral_range": 0.70, "bullish": 0.10, "bearish": 0.10, "conflicting_signals": 0.10}),
-                "vol__stance": choice("vol.stance", {"buy_premium": 0.70, "sell_premium": 0.10, "limit_vol_exposure": 0.10, "unclear": 0.10}),
+                "under__direction": choice(
+                    "under.direction", {"neutral_range": 0.70, "bullish": 0.10, "bearish": 0.10, "conflicting_signals": 0.10}
+                ),
+                "vol__stance": choice(
+                    "vol.stance", {"buy_premium": 0.70, "sell_premium": 0.10, "limit_vol_exposure": 0.10, "unclear": 0.10}
+                ),
             },
             {},
             "map:no_structure",
@@ -387,7 +415,12 @@ def _no_trade_steps() -> list[tuple[str, dict[str, Any], dict[str, Any], str]]:
             "fit:margin",
         ),
         ("step8 veto vol.explained_by_event hard", {"vol__explained_by_event": noul(0.706)}, {}, "veto:vol.explained_by_event:hard"),
-        ("step8 veto vol.explained_by_event uncertain", {"vol__explained_by_event": noul(0.50)}, {}, "veto:vol.explained_by_event:uncertain"),
+        (
+            "step8 veto vol.explained_by_event uncertain",
+            {"vol__explained_by_event": noul(0.50)},
+            {},
+            "veto:vol.explained_by_event:uncertain",
+        ),
         (
             "step9 score below min",
             {
@@ -403,7 +436,9 @@ def _no_trade_steps() -> list[tuple[str, dict[str, Any], dict[str, Any], str]]:
 
 
 @pytest.mark.parametrize(("name", "core_kw", "facts_kw", "expected"), _no_trade_steps(), ids=[c[0] for c in _no_trade_steps()])
-def test_each_step_of_the_entry_pipeline_fails_with_its_code(name: str, core_kw: dict[str, Any], facts_kw: dict[str, Any], expected: str) -> None:
+def test_each_step_of_the_entry_pipeline_fails_with_its_code(
+    name: str, core_kw: dict[str, Any], facts_kw: dict[str, Any], expected: str
+) -> None:
     decision = decide(rules(), core_answers(**core_kw), facts(**facts_kw))
     assert decision.action == "no_trade", name
     assert decision.reasons[0] == expected, f"{name}: {decision.reasons}"
@@ -533,14 +568,25 @@ def test_the_deterministic_mapping_is_exhaustive(direction: Direction, stance: V
 
 @pytest.mark.parametrize(
     ("p", "band"),
-    [(0.0, Tri.CLEAR), (0.294, Tri.CLEAR), (0.295, Tri.UNCERTAIN), (0.5, Tri.UNCERTAIN), (0.705, Tri.UNCERTAIN), (0.706, Tri.VETO), (1.0, Tri.VETO)],
+    [
+        (0.0, Tri.CLEAR),
+        (0.294, Tri.CLEAR),
+        (0.295, Tri.UNCERTAIN),
+        (0.5, Tri.UNCERTAIN),
+        (0.705, Tri.UNCERTAIN),
+        (0.706, Tri.VETO),
+        (1.0, Tri.VETO),
+    ],
 )
 def test_veto_bands_at_their_edges(p: float, band: Tri) -> None:
     cfg = RulesConfig()
     assert tri_band(p, cfg) is band
     decision = decide(rules(), core_answers(vol__explained_by_event=noul(p)), facts())
     codes = [code for code in decision.reasons if code.startswith("veto:vol.explained_by_event")]
-    assert codes == {Tri.CLEAR: [], Tri.UNCERTAIN: ["veto:vol.explained_by_event:uncertain"], Tri.VETO: ["veto:vol.explained_by_event:hard"]}[band]
+    assert (
+        codes
+        == {Tri.CLEAR: [], Tri.UNCERTAIN: ["veto:vol.explained_by_event:uncertain"], Tri.VETO: ["veto:vol.explained_by_event:hard"]}[band]
+    )
 
 
 def test_the_event_veto_applies_to_short_premium_only() -> None:
@@ -656,10 +702,14 @@ def sharp_core(**overrides: Answer) -> dict[str, Answer]:
     S_core = .30*.85 + .20*.82 + .20*.90 + .15*(.90 + 0.1/6) + .15*1.0 = .255 + .164 + .18 + .1375 + .15 = 0.8865
     """
     base: dict[str, Answer] = {
-        "under__direction": choice("under.direction", {"bullish": 0.85, "bearish": 0.05, "neutral_range": 0.05, "conflicting_signals": 0.05}),
+        "under__direction": choice(
+            "under.direction", {"bullish": 0.85, "bearish": 0.05, "neutral_range": 0.05, "conflicting_signals": 0.05}
+        ),
         "vol__stance": choice("vol.stance", {"sell_premium": 0.82, "buy_premium": 0.06, "limit_vol_exposure": 0.06, "unclear": 0.06}),
         "under__stretched": noul(0.0),
-        "fit__structure_family": choice("fit.structure_family", _peaked(vocab.CHOICE_LABELS["fit.structure_family"], "put_credit_spread", 0.90)),
+        "fit__structure_family": choice(
+            "fit.structure_family", _peaked(vocab.CHOICE_LABELS["fit.structure_family"], "put_credit_spread", 0.90)
+        ),
         "regime__market": choice("regime.market", _peaked(vocab.CHOICE_LABELS["regime.market"], "trending_up_calm", 0.90)),
     }
     base.update(overrides)
@@ -774,7 +824,9 @@ def test_an_errored_variant_counts_as_disagreement() -> None:
 
 def test_confirm_entry_leaves_a_no_trade_base_untouched() -> None:
     engine = rules()
-    base = decide(engine, core_answers(regime__market=choice("regime.market", {"disorderly_selloff": 0.8, "trending_up_calm": 0.2})), facts())
+    base = decide(
+        engine, core_answers(regime__market=choice("regime.market", {"disorderly_selloff": 0.8, "trending_up_calm": 0.2})), facts()
+    )
     assert base.action == "no_trade"
     assert engine.confirm_entry(base, {Variant.OPT_PERM: result(core_answers(), variant=Variant.OPT_PERM)}, None, facts()) is base
 

@@ -283,10 +283,14 @@ def test_empty_frames_have_their_columns(tmp_path: Path) -> None:
     with load.RunStore(empty.path) as handle:
         # a one-session run resolves nothing and trades nothing: every frame is empty but still typed
         assert load.calibration_frame(handle).empty
-        assert tuple(load.calibration_frame(handle).columns) == load.CALIBRATION_COLUMNS
+        columns = tuple(load.calibration_frame(handle).columns)
+        assert columns[: len(load.CALIBRATION_COLUMNS)] == load.CALIBRATION_COLUMNS
         assert load.reference_history(handle).empty
         assert tuple(load.reference_history(handle).columns) == load.REFERENCE_HISTORY_COLUMNS
-        assert load.trades_frame(handle).empty
+        # the one position opened on that session is still open: it is not a trade, and it has no P&L
+        trades = load.trades_frame(handle)
+        assert not trades["closed"].any()
+        assert trades["pnl_mid"].isna().all()
         assert isinstance(load.kill_frame(handle), pd.DataFrame)
         assert load.kill_affected_sessions(handle) == set()
 

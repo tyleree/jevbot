@@ -49,7 +49,7 @@ CONSTRUCTOR_FUNCTION = "make_clients"
 
 LIVE_HOST = "api" + "." + "alpaca" + "." + "markets"
 LIVE_HOST_PATTERN = r"(?<!paper-)" + LIVE_HOST.replace(".", r"\.")
-PAPER_OFF_PATTERN = r"\bpaper\b\s*[:=][^=\n]*\bFalse\b"
+PAPER_OFF_PATTERN = r"\bpaper\b\s*(?::\s*\w+\s*)?=\s*False\b"  # `paper=False` and the annotated `paper: bool = False`
 OVERRIDE_URL = "url" + "_" + "override"
 LIVE_ENUM = "TRADING" + "_" + "LIVE"
 LEGACY_ENV_NAMES = ("ALPACA" + "_API_KEY", "ALPACA" + "_SECRET_KEY", "AP" + "CA_")
@@ -108,7 +108,7 @@ def grep(pattern: str, paths: list[Path]) -> list[str]:
         if text is None:
             continue
         hits += [
-            f"{path.relative_to(REPO).as_posix()}:{number}: {line.strip()[:110]}"
+            f"{label(path)}:{number}: {line.strip()[:110]}"
             for number, line in enumerate(text.splitlines(), start=1)
             if compiled.search(line)
         ]
@@ -120,6 +120,8 @@ def code_only(source: str) -> str:
     out: list[str] = []
     line, column = 1, 0
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type == tokenize.ENDMARKER:
+            break  # the end marker sits on a line of its own and would add one to the file
         start_line, start_col = token.start
         end_line, end_col = token.end
         while line < start_line:
@@ -160,7 +162,7 @@ def refusal_list_ids(tree: ast.AST) -> set[int]:
 
 def legacy_name_problems(path: Path, source: str) -> list[str]:
     """Every legacy credential name in `source` that is not part of the refusal list, a comment or a docstring."""
-    where = path.relative_to(REPO).as_posix()
+    where = label(path)
     problems: list[str] = []
 
     for number, line in enumerate(code_only(source).splitlines(), start=1):
@@ -207,19 +209,19 @@ def _called_name(call: ast.Call) -> str:
 
 def paper_flag_problems(path: Path, source: str) -> list[str]:
     """Every trading-client construction that is not inside `make_clients` with a literal `paper=True` (INV-01)."""
-    where = path.relative_to(REPO).as_posix()
+    where = label(path)
     tree = ast.parse(source)
     problems: list[str] = []
     for call, function in construction_calls(tree):
-        label = f"{where}:{call.lineno}: {_called_name(call)}("
+        site = f"{where}:{call.lineno}: {_called_name(call)}("
         if function != CONSTRUCTOR_FUNCTION:
-            problems.append(f"{label} outside {CONSTRUCTOR_FUNCTION} (in {function or '<module level>'})")
+            problems.append(f"{site} outside {CONSTRUCTOR_FUNCTION} (in {function or '<module level>'})")
             continue
         keyword = next((k for k in call.keywords if k.arg == "paper"), None)
         if keyword is None:
-            problems.append(f"{label} without the paper keyword")
+            problems.append(f"{site} without the paper keyword")
         elif not (isinstance(keyword.value, ast.Constant) and keyword.value.value is True):
-            problems.append(f"{label} with paper={ast.unparse(keyword.value)}, which is not the literal True")
+            problems.append(f"{site} with paper={ast.unparse(keyword.value)}, which is not the literal True")
     return sorted(set(problems))
 
 

@@ -388,6 +388,38 @@ def test_the_iron_condor_golden() -> None:
     assert structmath.defined_risk_ok(StructureKind.IRON_CONDOR, candidate.structure.legs)
 
 
+# The whole factory-chain golden table: legs (side, right, strike_milli), width in cents, (orats, worst, mid) net and the
+# worst-band max loss with `fee_rt`. Every row is reproducible by hand from the raw quotes and the 10.3 / 9.2 arithmetic,
+# e.g. long_put: ask 486 -> 486 * 100 + fee_rt 10 = 48,610; call_credit: (600 - 115) * 100 + fee_rt 18 = 48,518.
+FACTORY_GOLDENS: Final[dict[StructureKind, tuple[tuple[tuple[str, str, int], ...], int, tuple[int, int, int], int]]] = {
+    StructureKind.LONG_CALL: ((("buy", "C", 461_000),), 0, (470, 471, 469), 47_110),
+    StructureKind.LONG_PUT: ((("buy", "P", 440_000),), 0, (485, 486, 484), 48_610),
+    StructureKind.CALL_DEBIT: ((("buy", "C", 454_000), ("sell", "C", 466_000)), 1_200, (473, 476, 471), 47_620),
+    StructureKind.PUT_DEBIT: ((("sell", "P", 436_000), ("buy", "P", 449_000)), 1_300, (393, 396, 391), 39_620),
+    StructureKind.CALL_CREDIT: ((("sell", "C", 468_000), ("buy", "C", 474_000)), 600, (-117, -115, -119), 48_518),
+    StructureKind.PUT_CREDIT: ((("buy", "P", 427_000), ("sell", "P", 432_000)), 500, (-74, -72, -76), 42_818),
+    StructureKind.IRON_CONDOR: (
+        (("buy", "P", 421_000), ("sell", "P", 427_000), ("sell", "C", 472_000), ("buy", "C", 478_000)),
+        600,
+        (-149, -146, -153),
+        45_435,
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", ALL_KINDS)
+def test_the_factory_chain_golden_of_every_kind(kind: StructureKind) -> None:
+    """Expected strikes, widths and nets for all seven structures on the default $450 chain (test plan 15.1)."""
+    legs, width, net, max_loss = FACTORY_GOLDENS[kind]
+    candidate = built(generator().build(kind, view_of(make_chain()), "SPY", budget_floor=DEFAULT_FLOOR))
+    assert tuple((leg.side.value, leg.contract.right.value, leg.contract.strike_milli) for leg in candidate.structure.legs) == legs
+    assert candidate.structure.width == width
+    assert (candidate.net.orats, candidate.net.worst, candidate.net.mid) == net
+    assert candidate.max_loss_per_contract == max_loss <= DEFAULT_FLOOR
+    assert candidate.net.mid <= candidate.net.orats <= candidate.net.worst  # mid is the best case, worst the natural
+    assert candidate.rejects == ()
+
+
 @pytest.mark.parametrize("kind", ALL_KINDS)
 def test_every_kind_is_defined_risk_and_canonically_ordered(kind: StructureKind) -> None:
     chain = make_chain()
