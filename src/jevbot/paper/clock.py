@@ -25,7 +25,8 @@ from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Final, Protocol, runtime_checkable
+from datetime import time as DayTime
+from typing import Any, Final, Protocol
 from zoneinfo import ZoneInfo
 
 from jevbot.errors import BrokerError, InvariantError
@@ -54,7 +55,6 @@ DEFAULT_BOOTTIME_GAP_S: Final = 90.0
 _MS: Final = 1000.0
 
 
-@runtime_checkable
 class RawClock(Protocol):
     """The shape of `alpaca.trading.models.Clock` (verified against the pinned wheel in `alpaca_client`)."""
 
@@ -68,7 +68,6 @@ class RawClock(Protocol):
     def next_close(self) -> datetime: ...
 
 
-@runtime_checkable
 class CalendarRow(Protocol):
     """The shape of `alpaca.trading.models.Calendar`: a session date plus NAIVE exchange-local open / close datetimes."""
 
@@ -266,9 +265,11 @@ class AlpacaCalendar:
             sessions = self._apply_cross_check(sessions, cross_check)
         self._sessions: Final[tuple[_Session, ...]] = tuple(sessions)
         self._ordinals: Final[tuple[int, ...]] = tuple(s.ordinal for s in self._sessions)
+        self._opens: Final[tuple[datetime, ...]] = tuple(s.open for s in self._sessions)
+        self._closes: Final[tuple[datetime, ...]] = tuple(s.close for s in self._sessions)
         self._lo: Final[date] = self._sessions[0].day
         self._hi: Final[date] = self._sessions[-1].day
-        self._regular_close: Final = self._modal_close()
+        self._regular_close: Final[DayTime] = self._modal_close()
         for alert in self._alerts:
             if on_alert is not None:
                 on_alert(alert)
@@ -333,9 +334,9 @@ class AlpacaCalendar:
             return []
         return [d for d in theirs if d not in known]
 
-    def _modal_close(self) -> Any:
+    def _modal_close(self) -> DayTime:
         """The exchange-local time of day most sessions close at; anything earlier is an early close (no literal, INV-13)."""
-        counts = Counter(s.close.astimezone(EXCHANGE_TZ).timetz().replace(tzinfo=None) for s in self._sessions)
+        counts = Counter(_local_close(s.close) for s in self._sessions)
         return counts.most_common(1)[0][0]
 
     # --- helpers -------------------------------------------------------------------------------------------------------
@@ -388,9 +389,8 @@ class AlpacaCalendar:
         return (s.open, s.close)
 
     def is_early_close(self, session: date) -> bool:
-        """True when the session closes before the calendar's regular exchange-local close (a 13:00 ET half day)."""
-        s = self._sessions[self._index(session)]
-        return s.close.astimezone(EXCHANGE_TZ).timetz().replace(tzinfo=None) < self._regular_close
+        """True when the session closes before the calendar's regular exchange-local close (a half day)."""
+        return _local_close(self._sessions[self._index(session)].close) < self._regular_close
 
     def next_session(self, d: date, n: int = 1) -> date:
         """The n-th session strictly after `d` (any calendar date)."""
@@ -407,21 +407,22 @@ class AlpacaCalendar:
         return d if self.is_session(d) else self.prev_session(d)
 
     def sessions_between(self, a: date, b: date) -> int:
-        """The number of sessions in the half-open interval (a, b]; negative arguments order is not allowed to matter."""
-        lo, hi = (a, b) if a <= b else (b, a)
-        count = bisect_right(self._ordinals, self._ordinal("b", hi)) - bisect_right(self._ordinals, self._ordinal("a", lo))
-        return count if a <= b else -count
+        """The number of sessions in (a, b]; 0 when b <= a (the `cal.XnysCalendar` contract, 3.1)."""
+        lo = bisect_right(self._ordinals, self._ordinal("a", a))
+        hi = bisect_right(self._ordinals, self._ordinal("b", b))
+        return max(0, hi - lo)
 
     def session_of(self, ts: datetime) -> date | None:
-        """The session whose [open, close] contains `ts`; `None` outside trading hours."""
-        if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
-            raise ValueError("session_of needs a tz-aware timestamp")
-        moment = ts.astimezone(UTC)
-        i = bisect_right([s.open for s in self._sessions], moment) - 1
-        if i < 0:
-            return None
-        s = self._sessions[i]
-        return s.day if s.open <= moment <= s.close else None
+        """The session whose [open, close] contains `ts` (both ends inclusive), else `None`.
+
+        Unlike the date lookups this accepts an instant outside the loaded window and answers `None`: a rolling broker
+        calendar is fetched per run, and "before the first session I know about" is not a programming error.
+        """
+        moment = _as_utc("ts", ts)
+        i = bisect_left(self._closes, moment)  # first session that closes at or after ts
+        if i < len(self._closes) and self._opens[i] <= moment:
+            return self._sessions[i].day
+        return None
 
     def offset_from_close(self, session: date, minutes_before: int) -> datetime:
         """THE way to express a cut-off (INV-13): `close - minutes_before`; a negative value lands after the close."""
@@ -430,20 +431,28 @@ class AlpacaCalendar:
 
     def next_open_after(self, ts: datetime) -> datetime:
         """The first session open strictly after `ts` (the `knowable_at` of an EOD series)."""
-        if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
-            raise ValueError("next_open_after needs a tz-aware timestamp")
-        moment = ts.astimezone(UTC)
-        opens = [s.open for s in self._sessions]
-        i = bisect_right(opens, moment)
-        if i >= len(opens):
+        moment = _as_utc("ts", ts)
+        i = bisect_right(self._opens, moment)
+        if i >= len(self._opens):
             raise ValueError(f"no session opens after {moment.isoformat()} inside the broker calendar")
-        return opens[i]
+        return self._opens[i]
 
 
 def _as_count(name: str, n: int) -> int:
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         raise ValueError(f"{name} must be an int >= 1, got {n!r}")
     return n
+
+
+def _as_utc(name: str, ts: datetime) -> datetime:
+    if not isinstance(ts, datetime) or ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
+        raise ValueError(f"{name} must be a tz-aware datetime, got {ts!r}")
+    return ts.astimezone(UTC)
+
+
+def _local_close(close: datetime) -> DayTime:
+    """The exchange-local time of day a session closes at, as a naive `time` (comparable across DST)."""
+    return close.astimezone(EXCHANGE_TZ).timetz().replace(tzinfo=None)
 
 
 def calendar_rows(client: Any, start: date, end: date) -> Sequence[CalendarRow]:

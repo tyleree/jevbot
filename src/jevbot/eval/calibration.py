@@ -426,7 +426,7 @@ def murphy(table: ReliabilityTable, y: npt.ArrayLike) -> MurphyDecomposition:
     rel = 0.0
     res = 0.0
     residual = 0.0
-    for k, b in enumerate(table.bins):
+    for k in range(len(table.bins)):
         members = table.bin_of == k
         count = float(members.sum())
         if count == 0.0:
@@ -479,7 +479,7 @@ def coherence(
     down = _as_prob(p_down, "p_down", allow_nan=True)
     up = _as_prob(p_up, "p_up", allow_nan=True)
     inside = _as_prob(p_inside, "p_inside", allow_nan=True)
-    n = _same_length(p_down=down, p_up=up, p_inside=inside)
+    _same_length(p_down=down, p_up=up, p_inside=inside)
     err = np.abs(down + up + inside - 1.0)
     finite = np.isfinite(err)
     usable = err[finite]
@@ -800,10 +800,10 @@ def recalibrate_walkforward(
         days, ys, imp = pack
         by_epoch: dict[int, list[int]] = {}
         for i in members.tolist():
-            day = event_sessions[i]
-            if day is None:
+            event_day = event_sessions[i]
+            if event_day is None:
                 continue
-            by_epoch.setdefault(epoch_of[day], []).append(i)
+            by_epoch.setdefault(epoch_of[event_day], []).append(i)
         for epoch, rows in by_epoch.items():
             fit_day = epoch_start[epoch]
             horizon = horizons[rows[0]]

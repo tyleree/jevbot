@@ -62,9 +62,7 @@ TRADING_DAYS_PER_YEAR: Final = 252  # the 252-day convention of 12.2 (rf = 0, V8
 #: 12.6: `N` counts registered trials with one of these purposes - completed, failed AND abandoned alike.
 SELECTION_PURPOSES: Final[frozenset[str]] = frozenset({"tune", "validate", "final"})
 #: 12.6: a trial carrying any of these flags is not strategy selection and never enters `N` or `Var(SR_n)`.
-EXCLUDED_FLAGS: Final[frozenset[str]] = frozenset(
-    {"placebo", "unmasked", "diagnostic", "shadow", "reference_history", "model_overlap"}
-)
+EXCLUDED_FLAGS: Final[frozenset[str]] = frozenset({"placebo", "unmasked", "diagnostic", "shadow", "reference_history", "model_overlap"})
 EXCLUDED_FLAG_PREFIXES: Final[tuple[str, ...]] = ("baseline:", "ablation:")
 #: 12.6: runs that are not strategy selection register under these derived families.
 DERIVED_FAMILY_SUFFIXES: Final[tuple[str, ...]] = ("#baseline", "#shadow", "#reference", "#diagnostic", "#ablation")

@@ -594,9 +594,7 @@ class CandidateGenerator:
         for wing, position in zip(wings, at, strict=True):
             legs.extend(wing.legs(position))
         ordered = tuple(sorted(legs, key=lambda leg: (leg.contract.right is Right.CALL, leg.contract.strike_milli)))
-        return Structure(
-            kind=kind, underlying=ctx.chain.underlying, expiry=ctx.expiry, last_session=ctx.last_session, legs=ordered
-        )
+        return Structure(kind=kind, underlying=ctx.chain.underlying, expiry=ctx.expiry, last_session=ctx.last_session, legs=ordered)
 
     def _price(self, structure: Structure, chain: ChainSnapshot) -> tuple[BandPrices, Cents]:
         """`(net, fee_rt)`: the same `FillModel.price` the brokers use, and the 10.7 round-trip fee at the headline prices."""
@@ -665,9 +663,7 @@ class CandidateGenerator:
 
         rejects: list[str] = []
         for leg in structure.legs:
-            rejects.extend(
-                structmath.leg_liquidity_rejects(quotes_by_occ[leg.contract.occ], sold=leg.side is Side.SELL, cfg=cfg.liquidity)
-            )
+            rejects.extend(structmath.leg_liquidity_rejects(quotes_by_occ[leg.contract.occ], sold=leg.side is Side.SELL, cfg=cfg.liquidity))
         rejects.extend(self._economics(structure, net, max_loss))
         rejects.extend(self._exdiv_block(structure, view, ctx))
 
@@ -685,7 +681,9 @@ class CandidateGenerator:
             bp_required_per_contract=structmath.bp_required_pc(kind, widths, net.worst, fee_rt, cfg.risk),
             breakevens=structmath.breakevens(kind, structure.legs, net.worst),
             short_distance_em=self._short_distance_em(structure, ctx),
-            net_delta=sum((1.0 if leg.side is Side.BUY else -1.0) * (quotes_by_occ[leg.contract.occ].delta or 0.0) for leg in structure.legs),
+            net_delta=sum(
+                (1.0 if leg.side is Side.BUY else -1.0) * (quotes_by_occ[leg.contract.occ].delta or 0.0) for leg in structure.legs
+            ),
             net_vega=sum((1.0 if leg.side is Side.BUY else -1.0) * (quotes_by_occ[leg.contract.occ].vega or 0.0) for leg in structure.legs),
             rejects=_order_rejects(rejects),
         )
@@ -844,7 +842,8 @@ def scan(
             for kind in kinds:
                 cell = counters.setdefault((underlying, kind, key.session.year), _new_cell())
                 cell["sessions"] += 1
-                result = generator._build(kind, view, underlying, floor)  # noqa: SLF001 - `_ScanView` is this module's own narrow view
+                # `_ScanView` is this module's own narrow view; `build()` is typed with the public `MarketView` contract
+                result = generator._build(kind, view, underlying, floor)
                 for code in result.rejects:
                     cell[f"reject:{code}"] += 1
                 if isinstance(result, CandidateReject):

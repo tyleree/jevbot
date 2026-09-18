@@ -657,7 +657,9 @@ def _crosscheck_failures(kind: StructureKind, facts: EntryFacts) -> list[str]:
     """7.3, in the order of vocab.CROSSCHECK_NAMES."""
     out: list[str] = []
     direction = STRUCTURE_DIRECTION[kind]
-    if (direction is Direction.BULLISH and facts.trend_code == _TREND_DOWN) or (direction is Direction.BEARISH and facts.trend_code == _TREND_UP):
+    if (direction is Direction.BULLISH and facts.trend_code == _TREND_DOWN) or (
+        direction is Direction.BEARISH and facts.trend_code == _TREND_UP
+    ):
         out.append("trend_not_opposed")
     if kind is StructureKind.IRON_CONDOR and facts.trend_code not in _TREND_RANGE:
         out.append("range_needs_no_trend")
