@@ -1,0 +1,15 @@
+{"id": "m01", "text": "SPY slips as the Nasdaq 100 leads declines", "symbols": ["SPY"], "masked": "the fund slips as a major equity index leads declines"}
+{"id": "m02", "text": "Fed Chair Jerome Powell speaks on Friday", "symbols": ["SPY"], "masked": "the central bank Chair a senior official speaks on [day]"}
+{"id": "m03", "text": "CPI and nonfarm payrolls land next week", "symbols": ["SPY"], "masked": "a major economic data release and a major economic data release land next week"}
+{"id": "m04", "text": "The deadline is March 31, 2025, not May 1", "symbols": ["SPY"], "masked": "The deadline is [month] [number] [year], not [month] [number]"}
+{"id": "m05", "text": "Shares rose 0.8%, the index gained 4.2 percent and bonds lost 9%", "symbols": ["SPY"], "masked": "Shares rose a fraction of a percent, the index gained several percent and bonds lost a very large percentage"}
+{"id": "m06", "text": "The spread widened by 25 basis points", "symbols": ["SPY"], "masked": "The spread widened by [number] basis points"}
+{"id": "m07", "text": "Global Widget Holdings reported that Acme Trading Partners had bought in", "symbols": ["SPY"], "masked": "Global Widget Holdings reported that [name] had bought in"}
+{"id": "m08", "text": "$SPY and Apple (NASDAQ: AAPL) both climbed", "symbols": ["SPY"], "masked": "the fund and a large company both climbed"}
+{"id": "m09", "text": "Ukraine war headlines weigh on Germany and France", "symbols": ["SPY"], "masked": "a major event headlines weigh on Germany and France"}
+{"id": "m10", "text": "Markets steady today; a decision is due tomorrow", "symbols": ["SPY"], "masked": "Markets steady today; a decision is due tomorrow"}
+{"id": "m11", "text": "Q3 revenue beat on the 15th", "symbols": ["SPY"], "masked": "[period] revenue beat on the [day]"}
+{"id": "m12", "text": "Index hits record high since March 2020", "symbols": ["SPY"], "masked": "Index hits a notable level"}
+{"id": "m13", "text": "The Federal Reserve and the European Central Bank differ", "symbols": ["SPY"], "masked": "the central bank and the central bank differ"}
+{"id": "m14", "text": "Traders sold 12,345 contracts worth $1.2 billion", "symbols": ["SPY"], "masked": "Traders sold [number] contracts worth [number] billion"}
+{"id": "m15", "text": "IWM lags while QQQ leads; the S&P 500 is flat", "symbols": ["IWM", "QQQ"], "masked": "the fund lags while the fund leads; a major equity index is flat"}

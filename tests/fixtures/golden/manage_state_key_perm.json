@@ -1,0 +1,94 @@
+{
+  "events": {
+    "earnings": "not_applicable_index_etf",
+    "next_session": [],
+    "inside_holding_window": [
+      "major central-bank rate decision in 12 sessions"
+    ],
+    "coverage": "scheduled events tracked: central-bank rate decisions only"
+  },
+  "vol_surface": {
+    "skew": "normal: downside puts moderately bid",
+    "term_structure": "contango: 30-day implied volatility below 90-day implied volatility",
+    "iv_change_1w": "falling_sharply: down more than 15 percent",
+    "iv_vs_realized": "iv_fair: implied volatility about equal to recent realized volatility",
+    "iv_rank_1y": {
+      "bucket": "low: 20 to 40 percent of the way from the past year's low to its high",
+      "value": 20
+    }
+  },
+  "underlying": {
+    "levels": {
+      "distance_from_52w_high": "near_high: within 2 percent of the 1-year high"
+    },
+    "range": {
+      "move_today": "advance: rose about a normal day's move",
+      "gap_today": "none: opened near the prior close",
+      "realized_vol_change": "contracting: last week's swings smaller than the past month's",
+      "realized_vol_20d_pctile_1y": {
+        "bucket": "upper_middle: 60th to 80th percentile of the past year",
+        "value": 76
+      }
+    },
+    "momentum": {
+      "consecutive_closes": {
+        "bucket": "no_streak: no run of closes in one direction",
+        "value": 1
+      },
+      "distance_from_20d_avg_in_atr": {
+        "bucket": "extended_above: price moderately above its 20-day average",
+        "value": 2
+      }
+    },
+    "trend": {
+      "strength": "strong: the 20-day move is large relative to normal daily swings",
+      "direction": "up: price above rising 20-day and 50-day averages"
+    }
+  },
+  "market": {
+    "tail_skew_index": "normal: middle of the past year's range",
+    "vol_of_vol": "normal: middle of the past year's range",
+    "near_term_stress": "neutral: 9-day and 30-day implied volatility about equal",
+    "vol_term_structure": "contango: 30-day implied volatility below 3-month implied volatility",
+    "vol_index_change_1w": "falling: down 5 to 15 percent",
+    "vol_index_pctile_1y": {
+      "bucket": "low: 20th to 40th percentile of the past year",
+      "value": 32
+    },
+    "as_of": "prior session close"
+  },
+  "changes_since_entry": {
+    "underlying_move_since_entry": {
+      "bucket": "favourable: price has moved in favour of the position since entry",
+      "value": 0
+    },
+    "iv_change_since_entry": "falling: down 5 to 15 percent",
+    "iv_vs_realized_now": "iv_fair",
+    "iv_vs_realized_at_entry": "iv_rich",
+    "trend_now": "up",
+    "trend_at_entry": "up"
+  },
+  "position": {
+    "price_vs_breakeven": null,
+    "short_strike_distance": "close: within three quarters of an expected move of the short strike",
+    "pnl": "small_gain: under one quarter of the maximum profit",
+    "time_to_expiry": {
+      "bucket": "four_weeks_or_more: about four weeks or more until expiry",
+      "value": 28
+    },
+    "sessions_held": {
+      "bucket": "about_one_week: held about one week",
+      "value": 6
+    },
+    "entry_thesis": "opened with trend up, implied volatility iv_rich versus realized, iv rank upper_middle, no tracked event inside the holding window",
+    "vol_exposure": "short premium: profits from time passing and falling implied volatility",
+    "directional_exposure": "neutral to bullish: profits if price stays above the short put strike",
+    "structure": "put_credit_spread"
+  },
+  "context": {
+    "decision_session": "near the close of the regular trading session",
+    "underlying_kind": "broad US large-cap equity index ETF",
+    "underlying_alias": "UNDERLYING_A"
+  },
+  "schema": "state.v1.manage"
+}

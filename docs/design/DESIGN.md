@@ -3154,7 +3154,8 @@ calm       = 1 - under.stretched.p
 S_core     = 0.30*align + 0.20*volfit + 0.20*fit + 0.15*regimefit + 0.15*calm            ([rules.weights], sum 1.0; TEXT-FREE)
 
 tone       = text.clearly_positive.p - text.clearly_negative.p   if text present and news_count > 0 and text.material_present.p >= 0.5 else 0
-news_align = 0.5 + 0.5*tone (bullish) | 0.5 - 0.5*tone (bearish) | 1 - abs(tone) (neutral_range)      ; = 0.5 when tone == 0
+news_align = 0.5 + 0.5*tone (bullish) | 0.5 - 0.5*tone (bearish) | 0.5 - 0.5*abs(tone) (neutral_range) ; = 0.5 when tone == 0
+             (rev 3: the neutral branch read `1 - abs(tone)`, which is 1.0 at tone 0 and gave every condor a rank bonus with news off)
 S_rank     = (1 - w)*S_core + w*news_align,   w = rules.text_rank_weight (0.05)
 ```
 `S_core` decides the floor (step 9) and the score tier; `S_rank` only orders underlyings competing for `risk.max_new_per_day`. News-off and

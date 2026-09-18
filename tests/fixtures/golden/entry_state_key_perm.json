@@ -1,0 +1,85 @@
+{
+  "events": {
+    "earnings": "not_applicable_index_etf",
+    "next_session": [],
+    "inside_holding_window": [
+      "major central-bank rate decision in 12 sessions"
+    ],
+    "coverage": "scheduled events tracked: central-bank rate decisions only"
+  },
+  "vol_surface": {
+    "expected_move_holding_window": {
+      "bucket": "4_to_6_percent: one expected move over this horizon is about 4 to 6 percent",
+      "unit": "tenths of a percent",
+      "value": 46
+    },
+    "expected_move_5_sessions": {
+      "bucket": "2_to_4_percent: one expected move over this horizon is about 2 to 4 percent",
+      "unit": "tenths of a percent",
+      "value": 21
+    },
+    "expected_move_1_session": {
+      "bucket": "half_to_1_percent: one expected move over this horizon is about half to 1 percent",
+      "unit": "tenths of a percent",
+      "value": 9
+    },
+    "skew": "normal: downside puts moderately bid",
+    "term_structure": "contango: 30-day implied volatility below 90-day implied volatility",
+    "iv_change_1w": "falling_sharply: down more than 15 percent",
+    "iv_vs_realized": "iv_fair: implied volatility about equal to recent realized volatility",
+    "iv_rank_1y": {
+      "bucket": "low: 20 to 40 percent of the way from the past year's low to its high",
+      "value": 20
+    }
+  },
+  "underlying": {
+    "levels": {
+      "distance_from_52w_high": "near_high: within 2 percent of the 1-year high"
+    },
+    "range": {
+      "move_today": "advance: rose about a normal day's move",
+      "gap_today": "none: opened near the prior close",
+      "realized_vol_change": "contracting: last week's swings smaller than the past month's",
+      "realized_vol_20d_pctile_1y": {
+        "bucket": "upper_middle: 60th to 80th percentile of the past year",
+        "value": 76
+      }
+    },
+    "momentum": {
+      "consecutive_closes": {
+        "bucket": "no_streak: no run of closes in one direction",
+        "value": 1
+      },
+      "distance_from_20d_avg_in_atr": {
+        "bucket": "extended_above: price moderately above its 20-day average",
+        "value": 2
+      }
+    },
+    "trend": {
+      "strength": "strong: the 20-day move is large relative to normal daily swings",
+      "direction": "up: price above rising 20-day and 50-day averages"
+    }
+  },
+  "market": {
+    "tail_skew_index": "normal: middle of the past year's range",
+    "vol_of_vol": "normal: middle of the past year's range",
+    "near_term_stress": "neutral: 9-day and 30-day implied volatility about equal",
+    "vol_term_structure": "contango: 30-day implied volatility below 3-month implied volatility",
+    "vol_index_change_1w": "falling: down 5 to 15 percent",
+    "vol_index_pctile_1y": {
+      "bucket": "low: 20th to 40th percentile of the past year",
+      "value": 32
+    },
+    "as_of": "prior session close"
+  },
+  "context": {
+    "holding_window_sessions": {
+      "bucket": "about_four_weeks: roughly twenty trading sessions",
+      "value": 20
+    },
+    "decision_session": "near the close of the regular trading session",
+    "underlying_kind": "broad US large-cap equity index ETF",
+    "underlying_alias": "UNDERLYING_A"
+  },
+  "schema": "state.v1.entry"
+}

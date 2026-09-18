@@ -1,0 +1,51 @@
+[prereg]
+id = "prereg.v1"
+primary_family = ["eval.down_1em_1s","eval.up_1em_1s","eval.inside_1em_1s","eval.down_1em_5s","eval.up_1em_5s","eval.inside_1em_5s"]
+# deliberately EXCLUDES eval.up_*: against an implied reference near 0.5 they are almost uninformative and would dominate a pooled Brier score
+primary_forecasts = "with_text"            # V9; the without-text set is secondary
+primary_variant = "base"
+primary_tier = "A"                         # Tier B is reported beside it, never pooled
+unit = "session"                           # d_t(ref) = mean over underlyings and primary questions of [(p_ref - y)^2 - (p_jev - y)^2]; 3 correlated ETFs => one cluster per session
+weighting = "equal per question"           # each question's loss differential is averaged first, then the questions are averaged
+references = ["implied_recalibrated", "base_rate_expanding"]
+reference_min_events = 250                 # per primary question, for EACH reference, counted over resolved training pairs available at the forecast's as_of
+reference_fallback = "none"                # there is NO fallback to raw implied and no small-sample base rate on the verdict path (see `eligible_session`)
+eligible_session = "a session enters d_t, and counts toward a look's n_sessions, ONLY IF both references are available (>= reference_min_events) for EVERY primary question on that session; other sessions are excluded and listed"
+bootstrap = { kind = "stationary", reps = 10000, min_block = 10, interval = "percentile" }     # block >= 2 x the longest primary horizon (overlapping 5-session outcomes)
+interval_candidates = ["percentile", "studentised", "null_calibrated"]      # `eval power` checks the empirical SIZE of each, in this order (12.3); `interval`
+                                                                            # above MUST equal the first candidate that holds its size, else `register` refuses
+size_rule = "empirical rejection rate under every null forecaster <= alpha + 2*sqrt(alpha*(1-alpha)/eval.null_sim_reps), at each look"
+looks = [ { n_sessions = 120, alpha = 0.01 }, { n_sessions = 250, alpha = 0.04 } ]        # two looks, Bonferroni split; n_sessions counts ELIGIBLE sessions
+success  = "at a look: the one-sided (1 - alpha) lower bound of mean d_t is > 0 against BOTH references (intersection-union test)"
+futility = "at the final look: the (1 - alpha) upper bound of pooled BSS against EITHER reference is < 0.005 => 'no skill'; otherwise 'undetermined'"
+never_sufficient = ["BSS_vs_raw_implied"]  # reported, never a verdict: drift + the variance risk premium let a constant forecaster beat N(d2)
+d12_literal = "BSS vs the RAW option-implied probability is printed in the pre-registered table beside the joint-test result, labelled 'D12 literal - not a verdict' (V11)"
+missing = "a MISSING Jev forecast (FORECAST entry with p_ppm = null) is imputed with the reference forecast (worst case for skill); void outcomes are excluded and listed"
+sensitivity = ["own-IV-history-only forecasts", "implied_method == smile_digital only", "div_in_window == no only",
+               "reference from the exec snapshot and the dec/exec average (indicative-feed noise)", "without_text forecasts",
+               "calendar gap to resolve: 1-session questions split into gap = 1 day vs gap >= 3 days (weekends, holidays)"]
+secondary = ["BSS_vs_raw_implied","BSS_vs_mockjev_constants","BSS_vs_coin","per-question BSS (Holm)","ECE","Murphy","coherence","log-loss",
+             "paired shadow P&L vs baseline 3","MC percentile vs baseline 4"]
+pnl_verdict = "not claimed before MinTRL is met; MinTRL is printed in every Tier A report (G1: Sharpe 1 vs 0 needs about 2.7 years)"
+power = "jevbot eval power must be run and its output (prereg/power.v1.json: size per null, power per skill level, chosen interval) committed next to this file before the first Tier A session"
+
+[prereg.reference_history]                 # the Jev-free training history BOTH references warm-start from (12.3)
+run_id = ""                                # the registered MockJev run over the mirror with purpose "reference" (`jevbot backtest run --purpose reference --decider mock`)
+ledger_head = ""                           # its ledger head; `eval prereg register` refuses while either field is empty or the run store does not verify
+data_manifest_hash = ""
+use = "training pairs (question, p_implied, y, resolved_on) and base-rate counts ONLY. Never scored, never pooled into any reported number; exempt from the pooling guard for this purpose alone"
+purge = "a pair is usable for a forecast made at session D only if resolved_on <= prev_session(D, h) with h = the question's own horizon"
+own_events = "resolved events of the evaluated run itself are appended to the training set under the same purge rule"
+
+[prereg.ablation_buckets_only]             # D11 / G9: registered WITH its expected result
+arms = ["Jev, state.render = bucket_only, news off, perturbation scope off", "baseline 7 (MockJev full) on the same sessions"]
+statistics = ["entry-decision agreement rate", "paired Brier difference per InfoClass", "paired P&L difference vs baseline 7 (code-only management), stationary bootstrap CI"]
+expected = "about 0: agreement >= 0.90 on RESTATE / JUDGEMENT questions' decisions; the 95% CI of both paired differences contains 0"
+interpretation = "as expected => Jev adds nothing on code-computed buckets (G9), and any skill claim must rest on the TEXT and FORECAST classes; a clearly non-zero difference in EITHER direction is reported as a finding, never tuned away"
+command = "jevbot baselines run RUN_ID --which ablation"
+
+[prereg.model_change]
+policy = "new namespace; never pooled into the primary endpoint"
+shadow_overlap = "while both models are served, run both for >= 20 sessions (base variant; the old one trades, the new one only answers)"
+agreement_report = ["gate-decision agreement rate","mean |dp| on the primary family","top-label agreement on the Choices"]
+procedure = "section 12.9: overlap run over sealed recorded days + `jevbot eval model-agreement RUN_OLD RUN_NEW` + the ops runbook"
