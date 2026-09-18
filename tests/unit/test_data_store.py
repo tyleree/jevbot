@@ -254,7 +254,7 @@ def test_manifest_detects_a_flipped_byte_a_resize_a_deletion_and_an_edited_hash(
     # tampering with the manifest itself: the recomputed hash of the listed files no longer matches
     data_store.write_parquet(path, frame())
     good = data_store.build_manifest("volidx", [path], created_at=CREATED)
-    payload = json.loads(json.dumps({**{k: v for k, v in _as_dict(good).items()}, "manifest_hash": "0" * 64}))
+    payload = json.loads(json.dumps({**_as_dict(good), "manifest_hash": "0" * 64}))
     data_store.write_json(data_store.manifest_path("volidx"), payload)
     with pytest.raises(ManifestMismatch, match="manifest_hash does not match"):
         data_store.verify_manifest("volidx")

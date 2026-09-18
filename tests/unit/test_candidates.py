@@ -580,13 +580,14 @@ def test_the_fitted_long_strike_is_the_furthest_otm_one_that_fits(kind: Structur
 @pytest.mark.parametrize("kind", ALL_KINDS)
 def test_the_short_leg_never_moves_with_the_budget(kind: StructureKind) -> None:
     chain = six_hundred_dollar_chain()
-    tight = generator().build(kind, view_of(chain), "SPY", budget_floor=DEFAULT_FLOOR)
+    tight = built(generator().build(kind, view_of(chain), "SPY", budget_floor=DEFAULT_FLOOR))
     roomy = built(generator().build(kind, view_of(chain), "SPY", budget_floor=100_000_000))
-    if isinstance(tight, CandidateReject):
-        pytest.skip(f"{kind.value} is unsizeable at the default floor on this chain")
     assert short_strikes(tight.structure) == short_strikes(roomy.structure)
-    if short_strikes(tight.structure):
-        assert tight.short_distance_em == roomy.short_distance_em
+    assert tight.short_distance_em == roomy.short_distance_em
+    if kind not in SINGLES:
+        # only the LONG leg answers to the budget, and on this chain it really does move
+        assert tight.structure.width <= roomy.structure.width
+        assert tight.max_loss_per_contract <= DEFAULT_FLOOR < roomy.max_loss_per_contract
 
 
 @pytest.mark.parametrize("kind", SINGLES)

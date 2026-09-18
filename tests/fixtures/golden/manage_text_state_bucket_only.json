@@ -1,0 +1,124 @@
+{
+  "schema": "state.v1.manage_text",
+  "context": {
+    "underlying_alias": "UNDERLYING_A",
+    "underlying_kind": "broad US large-cap equity index ETF",
+    "decision_session": "near the close of the regular trading session"
+  },
+  "position": {
+    "structure": "put_credit_spread",
+    "directional_exposure": "neutral to bullish: profits if price stays above the short put strike",
+    "vol_exposure": "short premium: profits from time passing and falling implied volatility",
+    "entry_thesis": "opened with trend up, implied volatility iv_rich versus realized, iv rank upper_middle, no tracked event inside the holding window",
+    "sessions_held": "about_one_week: held about one week",
+    "time_to_expiry": "four_weeks_or_more: about four weeks or more until expiry",
+    "pnl": "small_gain: under one quarter of the maximum profit",
+    "short_strike_distance": "close: within three quarters of an expected move of the short strike",
+    "price_vs_breakeven": null
+  },
+  "changes_since_entry": {
+    "trend_at_entry": "up",
+    "trend_now": "up",
+    "iv_vs_realized_at_entry": "iv_rich",
+    "iv_vs_realized_now": "iv_fair",
+    "iv_change_since_entry": "falling: down 5 to 15 percent",
+    "underlying_move_since_entry": "favourable: price has moved in favour of the position since entry"
+  },
+  "market": {
+    "as_of": "prior session close",
+    "vol_index_pctile_1y": "low: 20th to 40th percentile of the past year",
+    "vol_index_change_1w": "falling: down 5 to 15 percent",
+    "vol_term_structure": "contango: 30-day implied volatility below 3-month implied volatility",
+    "near_term_stress": "neutral: 9-day and 30-day implied volatility about equal",
+    "vol_of_vol": "normal: middle of the past year's range",
+    "tail_skew_index": "normal: middle of the past year's range"
+  },
+  "underlying": {
+    "trend": {
+      "direction": "up: price above rising 20-day and 50-day averages",
+      "strength": "strong: the 20-day move is large relative to normal daily swings"
+    },
+    "momentum": {
+      "distance_from_20d_avg_in_atr": "extended_above: price moderately above its 20-day average",
+      "consecutive_closes": "no_streak: no run of closes in one direction"
+    },
+    "range": {
+      "realized_vol_20d_pctile_1y": "upper_middle: 60th to 80th percentile of the past year",
+      "realized_vol_change": "contracting: last week's swings smaller than the past month's",
+      "gap_today": "none: opened near the prior close",
+      "move_today": "advance: rose about a normal day's move"
+    },
+    "levels": {
+      "distance_from_52w_high": "near_high: within 2 percent of the 1-year high"
+    }
+  },
+  "vol_surface": {
+    "iv_rank_1y": "low: 20 to 40 percent of the way from the past year's low to its high",
+    "iv_vs_realized": "iv_fair: implied volatility about equal to recent realized volatility",
+    "iv_change_1w": "falling_sharply: down more than 15 percent",
+    "term_structure": "contango: 30-day implied volatility below 90-day implied volatility",
+    "skew": "normal: downside puts moderately bid"
+  },
+  "events": {
+    "coverage": "scheduled events tracked: central-bank rate decisions only",
+    "inside_holding_window": [
+      "major central-bank rate decision in 12 sessions"
+    ],
+    "next_session": [],
+    "earnings": "not_applicable_index_etf"
+  },
+  "news_since_entry": {
+    "since_previous_session": [
+      {
+        "age": "2h",
+        "source_type": "newswire",
+        "headline": "Retail earnings season ends on a cautious note",
+        "summary": "Guidance was described as conservative by several analysts."
+      },
+      {
+        "age": "3h",
+        "source_type": "newswire",
+        "headline": "Bond yields slip after a quiet auction",
+        "summary": null
+      },
+      {
+        "age": "4h",
+        "source_type": "newswire",
+        "headline": "Energy prices ease as supply worries fade",
+        "summary": "Traders pointed to steady output from major producers."
+      },
+      {
+        "age": "5h",
+        "source_type": "newswire",
+        "headline": "Officials say no change to the policy path is planned",
+        "summary": null
+      },
+      {
+        "age": "6h",
+        "source_type": "newswire",
+        "headline": "Industrial output rises across the euro area",
+        "summary": "Factory activity improved for a second straight quarter, survey data showed."
+      }
+    ],
+    "earlier": [
+      {
+        "age": "25h",
+        "source_type": "press_release",
+        "headline": "Shipping rates climb on longer routes",
+        "summary": null
+      },
+      {
+        "age": "29h",
+        "source_type": "newswire",
+        "headline": "a major economic data release steady as builders stay busy",
+        "summary": "Permits were little changed from the prior month."
+      },
+      {
+        "age": "31h",
+        "source_type": "newswire",
+        "headline": "Labour market cooling gradually, economists say",
+        "summary": null
+      }
+    ]
+  }
+}

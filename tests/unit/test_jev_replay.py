@@ -8,21 +8,21 @@ network - `ReplayJev` imports nothing from `typesafe_sdk`, which a fresh subproc
 import os
 import subprocess
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import msgspec
 import pytest
 
-from jevbot import questions as questions_module
+from jevbot import canon, questions as questions_module
 from jevbot.config import Config
 from jevbot.errors import CacheMissError, ModelMismatchError
 from jevbot.jev.cache import SqliteDecisionCache
 from jevbot.jev.live import LiveJev
 from jevbot.jev.replay import REPLAY_NAME, ReplayJev
 from jevbot.jev.spend import SCOPE_BATCH, SpendGuard
-from jevbot.types import CacheMode, RequestKind, Variant
-from tests.fixtures.jev_transport import NAMESPACE, make_jev_transport, make_request
+from jevbot.types import CachedAnswer, CacheMode, RequestKind, Variant
+from tests.fixtures.jev_transport import NAMESPACE, SESSION, make_jev_transport, make_request
 
 RELEASE = date(2026, 9, 15)
 
@@ -89,40 +89,51 @@ def test_a_variant_that_was_not_recorded_misses(tmp_path: Path) -> None:
         replay = ReplayJev(Config().jev, cache)
         permuted = questions_module.opt_perm(questions_module.ENTRY_V1)
         with pytest.raises(CacheMissError):
-            replay.decide(make_request(Variant.OPT_PERM and RequestKind.ENTRY, Variant.OPT_PERM, questions=permuted))
+            replay.decide(make_request(RequestKind.ENTRY, Variant.OPT_PERM, questions=permuted))
     finally:
         cache.close()
 
 
-def test_the_model_is_verified_on_hits(tmp_path: Path) -> None:
-    cache, _ = record(tmp_path)
+def test_the_model_is_verified_on_a_hit(tmp_path: Path) -> None:
+    """INV-06 is checked on cache hits too: a row ANSWERED by another model can never answer for the pinned one.
+
+    A key embeds the REQUESTED model, so the only way a hit can carry a foreign `response_model` is a namespace whose rows
+    were answered by a different model than the run asks for - exactly the forced-model-change situation of 12.9.
+    """
+    requested, answered = "jev-1.13.0", "jev-1.14.0"
+    namespace = "mixed:jev-1.14.0:g0"
+    cache = SqliteDecisionCache(tmp_path / "cache" / "decisions.sqlite")
+    cache.ensure_namespace(namespace, answered, RELEASE, refresh=False)
+    req = make_request(namespace=namespace)
+    rows = [
+        CachedAnswer(
+            key=canon.cache_key(requested, req.state, req.question_set_hash, question),
+            namespace=namespace,
+            requested_model=requested,
+            response_model=answered,
+            question_set_id=req.question_set_id,
+            question_set_hash=req.question_set_hash,
+            state_hash=req.state_hash,
+            question_hash=questions_module.QUESTION_HASHES[qid],
+            question_id=qid,
+            request_kind=req.kind.value,
+            variant=req.variant.value,
+            answer_json='{"noul":0.5,"type":"noul"}',
+            request_id=None,
+            input_tokens=None,
+            latency_ms=None,
+            sdk_version="0.6.0",
+            created_at=datetime(2026, 9, 17, 20, 0, tzinfo=UTC),
+        )
+        for qid, question in req.questions.items()
+    ]
+    cache.put_request(namespace, rows, canon.dumps_ordered(req.state), canon.dumps_ordered(req.questions), (SESSION, "SPY", "entry", "base"))
     try:
-        replay = ReplayJev(msgspec.structs.replace(Config().jev, model="jev-1.14.0"), cache)
+        replay = ReplayJev(Config().jev, cache)  # pinned model = jev-1.13.0 = the requested one, so every key HITS
         with pytest.raises(ModelMismatchError, match="INV-06"):
-            # the keys are model-dependent, so a foreign model normally MISSES; force the hit path with the recorded keys
-            replay.cache = _ModelBlindCache(cache)  # type: ignore[assignment]
-            replay.decide(make_request())
+            replay.decide(req)
     finally:
         cache.close()
-
-
-class _ModelBlindCache:
-    """A cache double that answers every key from the recorded row set - the only way to reach the hit path with a
-    foreign model id (the real keys embed the model). It proves the row-level model check of `result_from_rows`."""
-
-    def __init__(self, inner: SqliteDecisionCache) -> None:
-        self._rows = list(inner.get_many(NAMESPACE, [row for row in _all_keys(inner)]).values())
-
-    def get_many(self, namespace: str, keys: list[str]) -> dict[str, object]:
-        return {key: row for key, row in zip(keys, self._rows, strict=False)}
-
-
-def _all_keys(cache: SqliteDecisionCache) -> list[str]:
-    questions = questions_module.ENTRY_V1
-    req = make_request()
-    from jevbot import canon
-
-    return [canon.cache_key("jev-1.13.0", req.state, req.question_set_hash, q) for q in questions.values()]
 
 
 def test_replay_jev_never_imports_the_sdk(tmp_path: Path) -> None:

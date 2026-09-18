@@ -134,8 +134,7 @@ def test_the_registry_is_append_only(registry: reg.Registry, tmp_path: Path) -> 
     meta = run_meta()
     registry.register_trial(meta, git_commit="abc", git_dirty=False)
     registry.record_result(meta.run_id, n_days=1, ledger_head="head")
-    registry.put_prereg(prereg_id="prereg.v1", sha256="a" * 64, git_commit="c" * 40, body_toml="[prereg]
-")
+    registry.put_prereg(prereg_id="prereg.v1", sha256="a" * 64, git_commit="c" * 40, body_toml="[prereg]\n")
     write_probe_record(tmp_path, "determinism")
     registry.sync_step0(tmp_path)
     for table in ("trials", "trial_results", "prereg", "step0_records"):

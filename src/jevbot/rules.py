@@ -309,8 +309,13 @@ def no_trade(underlying: str, decision_id: str, *reasons: str) -> EntryDecision:
 
 
 def text_watch_alert(decision: ManageDecision, cfg: RulesConfig) -> bool:
-    """7.7: True exactly when the unconfirmed-text counter has just REACHED `rules.text_watch_alert_sessions` - the one cycle in
-    which `RISK_EVENT{text_watch}` is appended and the alert raised (once per position). Never a reason to close (INV-16)."""
+    """7.7: True exactly on the cycle in which the unconfirmed-text counter REACHES `rules.text_watch_alert_sessions` - the one
+    that appends `RISK_EVENT{text_watch}` and raises the alert. Never a reason to close (INV-16).
+
+    The counter resets to 0 as soon as the reading clears, so a run of hostile sessions alerts once; a later, separate run
+    would alert again. Deduplicating beyond that (`once per position`) is the cycle's, since only it knows the position's
+    history.
+    """
     return decision.watch_text == cfg.text_watch_alert_sessions
 
 

@@ -79,7 +79,7 @@ def quote_tape(chain: object, symbols: Iterable[str]) -> dict[str, tuple[int, in
 @dataclass
 class _Order:
     state: OrderState
-    order: ApprovedOrder
+    order: ApprovedOrder | None  # None for an order injected straight into the broker (a foreign / probe leftover)
     visible: bool = True  # False for a `late_post`: accepted, but the next lookup is the first that sees it
 
 
@@ -131,11 +131,28 @@ class FakeBroker:
             raise ValueError(f"unknown fault {fault!r}; known: {FAULTS}")
         self.faults.setdefault(call, []).append(fault)
 
+    def inject_order(self, client_order_id: str, *, qty: int = 1, status: OrderStatus = OrderStatus.SUBMITTED) -> None:
+        """A working order the ledger never created: a foreign order, or a `jbp-` probe leftover (reconcile R1)."""
+        self._orders[client_order_id] = _Order(
+            state=OrderState(
+                client_order_id=client_order_id,
+                broker_order_id=f"fake-foreign-{len(self._orders) + 1}",
+                status=status,
+                qty=qty,
+                filled_qty=0,
+                filled_net=None,
+                reject_code=None,
+                message=None,
+                updated_at=self.now,
+            ),
+            order=None,
+        )
+
     def force_fill(self, client_order_ids: Sequence[str] = ()) -> None:
         """Fill every (or the named) working order whatever the tape says - the escape hatch beside `refuse_fills`."""
         wanted = set(client_order_ids)
         for cid, record in self._orders.items():
-            if (wanted and cid not in wanted) or record.state.status in TERMINAL_STATUSES:
+            if (wanted and cid not in wanted) or record.state.status in TERMINAL_STATUSES or record.order is None:
                 continue
             self._book(record, record.order.qty - record.state.filled_qty)
 
@@ -264,7 +281,7 @@ class FakeBroker:
     def _maybe_fill(self, client_order_id: str) -> None:
         record = self._orders[client_order_id]
         order = record.order
-        if self.refuse_fills or not self._marketable(order):
+        if order is None or self.refuse_fills or not self._marketable(order):
             return
         if order.intent.equity_symbol is not None:
             self._fill_equity(record)
@@ -293,6 +310,8 @@ class FakeBroker:
 
     def _book(self, record: _Order, qty: int) -> None:
         order = record.order
+        if order is None:
+            return
         for leg in order.intent.legs:
             signed = qty * leg.ratio * (1 if leg.side is Side.BUY else -1)
             self.set_position(leg.contract.occ, self.positions_by_symbol.get(leg.contract.occ, 0) + signed)
@@ -306,6 +325,7 @@ class FakeBroker:
         )
 
     def _fill_equity(self, record: _Order) -> None:
+        assert record.order is not None
         intent = record.order.intent
         symbol = intent.equity_symbol or ""
         shares = intent.equity_qty or 0

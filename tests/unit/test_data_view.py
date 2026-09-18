@@ -6,7 +6,7 @@ against cannot drift from the implementation the engine runs.
 """
 
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -31,6 +31,8 @@ from tests.fixtures.fake_view import (
 
 SESSION: date = date(2024, 5, 17)
 NewsLike = TableNewsSource | NullNewsSource
+# deliberately naive (built from a tz-aware instant so the DTZ lint stays on): the view must refuse it
+NAIVE: datetime = datetime(2024, 5, 17, 20, 0, tzinfo=UTC).replace(tzinfo=None)
 
 
 class StubChainProvider:
@@ -497,7 +499,7 @@ def test_opened_partitions_lists_the_files_the_view_actually_read() -> None:
 def test_a_naive_as_of_is_refused() -> None:
     chain = make_chain("SPY", session=SESSION, calendar=xnys())
     with pytest.raises(ValueError, match="tz-aware"):
-        bare_view(chain, datetime(2024, 5, 17, 20, 0))
+        bare_view(chain, NAIVE)
 
 
 def test_table_names_are_the_documented_keys() -> None:

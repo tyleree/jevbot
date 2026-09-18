@@ -6,6 +6,7 @@ the normal cdf from `math.erfc`, the planted smile of the chain factory, the tot
 spec text - never by re-running the function under test.
 """
 
+import itertools
 import math
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -31,7 +32,9 @@ from tests.fixtures.chain_factory import (
     xnys,
 )
 
-FLAT = Smile(skew=0.0, curvature=0.0)  # a smile with no skew: `dw/dk = 0`, so the digital must be exactly N(d2)
+FLAT = Smile(skew=0.0, curvature=0.0)  # a smile with no skew: `dw/dk` is 0 up to quote rounding
+# deliberately naive (built from a tz-aware instant so the DTZ lint stays on): every surface call must refuse it
+NAIVE: datetime = datetime(2024, 5, 17, 20, 0, tzinfo=UTC).replace(tzinfo=None)
 
 
 @pytest.fixture(scope="module")
@@ -161,7 +164,7 @@ def test_parity_forwards_need_the_raw_quote_columns(cal: XnysCalendar) -> None:
     with pytest.raises(DataError, match="needs a `bid` column"):
         surface.parity_forwards(raw_table(chain).drop(columns=["bid"]), chain.rate, chain.ts, cal)
     with pytest.raises(ValueError, match="tz-aware"):
-        surface.parity_forwards(raw_table(chain), chain.rate, datetime(2024, 5, 17, 20, 0), cal)
+        surface.parity_forwards(raw_table(chain), chain.rate, NAIVE, cal)
 
 
 # ======================================================================================================================
@@ -736,7 +739,7 @@ def test_the_digital_is_monotone_in_the_strike_and_clipped(cal: XnysCalendar) ->
         got = surface.implied_prob_above(chain, strike, resolve, cal)
         assert got is not None
         probabilities.append(got[0])
-    assert all(later <= earlier for earlier, later in zip(probabilities, probabilities[1:], strict=False))
+    assert all(later <= earlier for earlier, later in itertools.pairwise(probabilities))
     assert all(0.001 <= p <= 0.999 for p in probabilities)
     far = surface.implied_prob_above(chain, int(chain.spot * 3), resolve, cal)
     assert far is not None and far[0] == 0.001
@@ -751,7 +754,7 @@ def test_the_digital_is_none_when_there_is_no_usable_horizon(cal: XnysCalendar) 
     with pytest.raises(ValueError, match="strike_c must be positive"):
         surface.implied_prob_above(chain, 0, resolve, cal)
     with pytest.raises(ValueError, match="tz-aware"):
-        surface.implied_prob_above(chain, chain.spot, datetime(2024, 5, 24, 20, 0), cal)
+        surface.implied_prob_above(chain, chain.spot, NAIVE, cal)
 
 
 def test_a_node_without_a_fit_contributes_a_flat_smile(cal: XnysCalendar) -> None:

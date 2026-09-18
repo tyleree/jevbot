@@ -178,13 +178,13 @@ def _golden_text(state: dict[str, Any]) -> str:
     return json.dumps(state, indent=2, ensure_ascii=False) + "\n"
 
 
-def _check_golden(goldens: Any, name: str, built: BuiltState) -> None:
-    """Compare the reviewed bytes AND prove that the wire bytes (insertion order) are the hashed ones."""
-    goldens.check_text(name, _golden_text(built.state))
+def _check_golden(goldens: Any, name: str, state: dict[str, Any]) -> None:
+    """Compare the reviewed bytes AND prove that the file's KEY ORDER is the one that reaches the wire (V1)."""
+    goldens.check_text(name, _golden_text(state))
     path = goldens.path(name)
     if path.exists():
         loaded = json.loads(path.read_text(encoding="utf-8"))  # json.loads keeps the file's key order
-        assert sha256_hex(dumps_ordered(loaded)) == built.state_hash
+        assert dumps_ordered(loaded) == dumps_ordered(state)
 
 
 # ======================================================================================================================
@@ -195,13 +195,10 @@ def _check_golden(goldens: Any, name: str, built: BuiltState) -> None:
 def test_entry_state_golden(builder: StateBuilder, world: FakeView, goldens: Any) -> None:
     built = builder.entry(world, "SPY")
     assert built is not None
-    _check_golden(goldens, "entry_state.json", built)
-    _check_golden(goldens, "entry_state_key_perm.json", msgspec.structs.replace(built, state=builder.variant(built.state, Variant.KEY_PERM)))
-    _check_golden(
-        goldens,
-        "entry_state_bucket_only.json",
-        msgspec.structs.replace(built, state=builder.variant(built.state, Variant.BUCKET_ONLY)),
-    )
+    _check_golden(goldens, "entry_state.json", built.state)
+    _check_golden(goldens, "entry_state_key_perm.json", builder.variant(built.state, Variant.KEY_PERM))
+    _check_golden(goldens, "entry_state_bucket_only.json", builder.variant(built.state, Variant.BUCKET_ONLY))
+    assert built.state_hash == sha256_hex(dumps_ordered(built.state))
 
 
 def test_entry_text_state_golden(builder: StateBuilder, world: FakeView, goldens: Any) -> None:
@@ -209,26 +206,18 @@ def test_entry_text_state_golden(builder: StateBuilder, world: FakeView, goldens
     assert base is not None
     built = builder.entry_text(world, "SPY", base)
     assert built is not None
-    _check_golden(goldens, "entry_text_state.json", built)
-    _check_golden(
-        goldens, "entry_text_state_key_perm.json", msgspec.structs.replace(built, state=builder.variant(built.state, Variant.KEY_PERM))
-    )
-    _check_golden(
-        goldens,
-        "entry_text_state_bucket_only.json",
-        msgspec.structs.replace(built, state=builder.variant(built.state, Variant.BUCKET_ONLY)),
-    )
+    _check_golden(goldens, "entry_text_state.json", built.state)
+    _check_golden(goldens, "entry_text_state_key_perm.json", builder.variant(built.state, Variant.KEY_PERM))
+    _check_golden(goldens, "entry_text_state_bucket_only.json", builder.variant(built.state, Variant.BUCKET_ONLY))
+    assert built.state_hash == sha256_hex(dumps_ordered(built.state))
 
 
 def test_manage_state_golden(builder: StateBuilder, world: FakeView, goldens: Any) -> None:
     built = builder.manage(world, _position(world))
-    _check_golden(goldens, "manage_state.json", built)
-    _check_golden(goldens, "manage_state_key_perm.json", msgspec.structs.replace(built, state=builder.variant(built.state, Variant.KEY_PERM)))
-    _check_golden(
-        goldens,
-        "manage_state_bucket_only.json",
-        msgspec.structs.replace(built, state=builder.variant(built.state, Variant.BUCKET_ONLY)),
-    )
+    _check_golden(goldens, "manage_state.json", built.state)
+    _check_golden(goldens, "manage_state_key_perm.json", builder.variant(built.state, Variant.KEY_PERM))
+    _check_golden(goldens, "manage_state_bucket_only.json", builder.variant(built.state, Variant.BUCKET_ONLY))
+    assert built.state_hash == sha256_hex(dumps_ordered(built.state))
 
 
 def test_manage_text_state_golden(builder: StateBuilder, world: FakeView, goldens: Any) -> None:
@@ -236,15 +225,10 @@ def test_manage_text_state_golden(builder: StateBuilder, world: FakeView, golden
     base = builder.manage(world, position)
     built = builder.manage_text(world, position, base)
     assert built is not None
-    _check_golden(goldens, "manage_text_state.json", built)
-    _check_golden(
-        goldens, "manage_text_state_key_perm.json", msgspec.structs.replace(built, state=builder.variant(built.state, Variant.KEY_PERM))
-    )
-    _check_golden(
-        goldens,
-        "manage_text_state_bucket_only.json",
-        msgspec.structs.replace(built, state=builder.variant(built.state, Variant.BUCKET_ONLY)),
-    )
+    _check_golden(goldens, "manage_text_state.json", built.state)
+    _check_golden(goldens, "manage_text_state_key_perm.json", builder.variant(built.state, Variant.KEY_PERM))
+    _check_golden(goldens, "manage_text_state_bucket_only.json", builder.variant(built.state, Variant.BUCKET_ONLY))
+    assert built.state_hash == sha256_hex(dumps_ordered(built.state))
 
 
 def _three_slot_worlds() -> tuple[FakeView, FakeView]:
@@ -287,7 +271,8 @@ def test_entry_state_3slot_golden_equals_the_collapsed_fixture(builder: StateBui
     assert built is not None and same is not None
     assert built.state == same.state and built.state_hash == same.state_hash
     assert built.facts == same.facts
-    _check_golden(goldens, "entry_state_3slot.json", built)
+    _check_golden(goldens, "entry_state_3slot.json", built.state)
+    assert built.state_hash == sha256_hex(dumps_ordered(built.state))
 
 
 # ======================================================================================================================
@@ -571,12 +556,13 @@ def test_the_text_free_states_are_invariant_to_arbitrary_news(builder: StateBuil
     quiet = make_view(("SPY",), news=(), news_covered=False)
     hashes = set()
     manage_hashes = set()
-    for news, covered in ((), (hostile, True), (benign, True), ([*hostile, *benign], True)) if False else (
-        ((), False),
+    corpora: tuple[tuple[list[NewsItem], bool], ...] = (
+        ([], False),
         (hostile, True),
         (benign, True),
         ([*hostile, *benign], True),
-    ):
+    )
+    for news, covered in corpora:
         world = make_view(("SPY",), news=news, news_covered=covered)
         built = builder.entry(world, "SPY")
         assert built is not None
@@ -654,17 +640,22 @@ def test_news_status_is_none_in_window_when_nothing_survives(builder: StateBuild
 
 
 def test_the_whole_state_is_trimmed_to_state_max_chars_oldest_first(terms: MaskTerms, world: FakeView) -> None:
-    cfg = msgspec.structs.replace(Config(), state=StateConfig(max_chars=3_000))
+    plain = StateBuilder(Config(), terms, news_resolved=True)
+    untrimmed_base = plain.entry(world, "SPY")
+    assert untrimmed_base is not None
+    untrimmed = plain.entry_text(world, "SPY", untrimmed_base)
+    assert untrimmed is not None
+    budget = len(dumps_ordered(untrimmed.state)) - 400  # room for about two fewer items
+    cfg = msgspec.structs.replace(Config(), state=StateConfig(max_chars=budget))
     builder = StateBuilder(cfg, terms, news_resolved=True)
     base = builder.entry(world, "SPY")
     assert base is not None
     built = builder.entry_text(world, "SPY", base)
     assert built is not None and isinstance(built.facts, EntryFacts)
-    assert len(dumps_ordered(built.state)) <= 3_000
+    assert len(dumps_ordered(built.state)) <= budget
     assert 0 < built.facts.news_count < 8
-    assert built.provenance.news_ids[: built.facts.news_count] == ("b05", "b04", "b03", "b02", "b01", "b06", "b07", "b08")[
-        : built.facts.news_count
-    ] or built.facts.news_count > 0
+    kept = built.facts.news_count
+    assert built.provenance.news_ids == ("b05", "b04", "b03", "b02", "b01", "b06", "b07", "b08")[:kept]  # the oldest went first
 
 
 def test_manage_text_is_none_without_news_since_entry(builder: StateBuilder, cfg: Config, terms: MaskTerms) -> None:
@@ -796,12 +787,18 @@ def test_the_identity_block_appears_only_with_the_leakage_flag(world: FakeView, 
     assert list(text.state)[-3:] == ["news_status", "news", "identity"]
 
 
-def test_an_unknown_underlying_alias_is_refused(world: FakeView, terms: MaskTerms) -> None:
+def test_a_missing_alias_is_refused_rather_than_leaking_the_ticker(world: FakeView, terms: MaskTerms) -> None:
+    from jevbot.config import UniverseConfig
     from jevbot.errors import InvariantError
 
-    builder = StateBuilder(Config(), terms, news_resolved=True)
+    cfg = msgspec.structs.replace(Config(), universe=UniverseConfig(alias={}, kind={"SPY": "an index ETF"}))
+    builder = StateBuilder(cfg, terms, news_resolved=True)
     with pytest.raises(InvariantError, match="alias"):
-        builder.entry(world, "ZZZ")
+        builder.entry(world, "SPY")
+    no_kind = msgspec.structs.replace(Config(), universe=UniverseConfig(kind={}))
+    with pytest.raises(InvariantError, match="kind"):
+        StateBuilder(no_kind, terms, news_resolved=True).entry(world, "SPY")
+    assert builder.entry(world, "ZZZ") is None  # an underlying without data never reaches the alias table
 
 
 def test_the_builder_implements_the_protocol() -> None:
