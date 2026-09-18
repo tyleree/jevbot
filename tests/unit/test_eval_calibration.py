@@ -538,12 +538,8 @@ def test_timestamp_typed_session_columns_are_accepted() -> None:
     events = _events_frame(rng, n_sessions=5, start=261, p_forecast=0.12)
     as_dates = cal.base_rate_expanding(events, history, min_events=250)
 
-    stamped_events = events.assign(
-        session=pd.to_datetime(events["session"]), resolved_on=pd.to_datetime(events["resolved_on"])
-    )
-    stamped_history = history.assign(
-        session=pd.to_datetime(history["session"]), resolved_on=pd.to_datetime(history["resolved_on"])
-    )
+    stamped_events = events.assign(session=pd.to_datetime(events["session"]), resolved_on=pd.to_datetime(events["resolved_on"]))
+    stamped_history = history.assign(session=pd.to_datetime(history["session"]), resolved_on=pd.to_datetime(history["resolved_on"]))
     assert np.allclose(cal.base_rate_expanding(stamped_events, stamped_history, min_events=250), as_dates, equal_nan=True)
 
 

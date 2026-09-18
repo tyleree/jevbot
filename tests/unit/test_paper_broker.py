@@ -124,14 +124,22 @@ def orders_config(**overrides: object) -> OrdersConfig:
     return OrdersConfig(**{**base, **overrides})  # type: ignore[arg-type]
 
 
-def make_broker(
-    client: FakeTradingClient | None = None,
-    *,
-    sleep: Callable[[float], None] = lambda _: None,
-    **config: object,
-) -> tuple[AlpacaPaperBroker, FakeTradingClient]:
+def make_broker(client: FakeTradingClient | None = None, **config: object) -> tuple[AlpacaPaperBroker, FakeTradingClient]:
+    """The adapter with a VIRTUAL clock: every injected sleep advances it, so backoffs and poll deadlines are exact and
+    instant. The wall-clock deadline of `_run_once` is a real `Thread.join` and is deliberately not virtualised."""
     trading = client if client is not None else FakeTradingClient()
-    broker = AlpacaPaperBroker(fake_clients(trading), orders_config(**config), now=lambda: NOW, sleep=sleep)
+    virtual = [0.0]
+
+    def tick(seconds: float) -> None:
+        virtual[0] += seconds
+
+    broker = AlpacaPaperBroker(
+        fake_clients(trading),
+        orders_config(**config),
+        now=lambda: NOW,
+        sleep=tick,
+        monotonic=lambda: virtual[0],
+    )
     return broker, trading
 
 

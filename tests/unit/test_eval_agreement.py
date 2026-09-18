@@ -432,6 +432,84 @@ def test_unknown_primary_question_is_refused(tmp_path: Path) -> None:
         model_agreement(old, new, ())
 
 
+def _rebuild_with_payload(path: Path, namespace: str, payload: dict[str, Any]) -> Path:
+    """Write one hand-shaped DECISION entry into a fresh store (the ledger is append-only, so nothing is mutated)."""
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(_SCHEMA)
+        connection.execute(
+            "INSERT INTO ledger (seq, kind, session, as_of, payload, prev_hash, hash) VALUES (1, 'decision', ?, ?, ?, ?, ?)",
+            (_day(0).isoformat(), _as_of(_day(0)), json.dumps(payload, sort_keys=True), GENESIS, f"hash-{namespace}"),
+        )
+        connection.execute("INSERT INTO meta (key, value) VALUES ('namespace', ?)", (namespace,))
+        connection.commit()
+    finally:
+        connection.close()
+    return path
+
+
+def test_a_decision_without_a_rules_block_is_refused(tmp_path: Path) -> None:
+    """2.11 fixes the DECISION payload; a store that does not carry it is a bug, not a missing value."""
+    old = _rebuild_with_payload(tmp_path / "old.sqlite", "ns_old", {"kind": "entry", "requests": []})
+    new = build_store(tmp_path / "new.sqlite", namespace="ns_new", decisions=_sample_decisions())
+    with pytest.raises(EvalError, match="rules block"):
+        model_agreement(old, new, PRIMARY)
+
+
+def test_a_decision_without_an_underlying_is_refused(tmp_path: Path) -> None:
+    old = _rebuild_with_payload(tmp_path / "old.sqlite", "ns_old", {"kind": "entry", "requests": [], "rules": {"action": "enter"}})
+    new = build_store(tmp_path / "new.sqlite", namespace="ns_new", decisions=_sample_decisions())
+    with pytest.raises(EvalError, match="underlying"):
+        model_agreement(old, new, PRIMARY)
+
+
+def test_a_malformed_choice_answer_is_refused(tmp_path: Path) -> None:
+    """The Choice answer contract of 2.11: `{label: ppm int}` (or an explicit `{"top": ..., "probs": ...}`)."""
+    payload = {
+        "kind": "entry",
+        "rules": {"underlying": "SPY", "action": "enter", "kind": "iron_condor"},
+        "requests": [{"request_kind": "entry", "variant": "base", "answers": {"vol.stance": 420000}}],
+    }
+    old = _rebuild_with_payload(tmp_path / "old.sqlite", "ns_old", payload)
+    new = build_store(tmp_path / "new.sqlite", namespace="ns_new", decisions=_sample_decisions())
+    with pytest.raises(EvalError, match="label -> ppm"):
+        model_agreement(old, new, PRIMARY)
+
+
+def test_an_explicit_top_key_is_honoured(tmp_path: Path) -> None:
+    payload = {
+        "kind": "entry",
+        "rules": {"underlying": "SPY", "action": "enter", "kind": "iron_condor"},
+        "requests": [
+            {
+                "request_kind": "entry",
+                "variant": "base",
+                "answers": {"vol.stance": {"top": "buy_premium", "probs": _choice_answer("vol.stance", "sell_premium")}},
+            }
+        ],
+    }
+    old = _rebuild_with_payload(tmp_path / "old.sqlite", "ns_old", payload)
+    new = _rebuild_with_payload(tmp_path / "new.sqlite", "ns_new", payload)
+    report = model_agreement(old, new, PRIMARY)
+    assert report.top_label_agreement["vol.stance"] == 1.0
+    assert report.n_top_label_pairs["vol.stance"] == 1
+
+
+def test_an_event_key_naming_two_questions_is_refused(tmp_path: Path) -> None:
+    old = build_store(
+        tmp_path / "old.sqlite",
+        namespace="ns_old",
+        forecasts=[Forecast(_day(0), "ek1", "eval.down_1em_1s", True, 100_000)],
+    )
+    new = build_store(
+        tmp_path / "new.sqlite",
+        namespace="ns_new",
+        forecasts=[Forecast(_day(0), "ek1", "eval.up_1em_1s", True, 100_000)],
+    )
+    with pytest.raises(EvalError, match="names"):
+        model_agreement(old, new, PRIMARY)
+
+
 def test_a_missing_run_store_is_refused(tmp_path: Path) -> None:
     old = build_store(tmp_path / "old.sqlite", namespace="ns_old", decisions=_sample_decisions())
     with pytest.raises(EvalError, match="not found"):

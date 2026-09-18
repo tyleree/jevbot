@@ -222,8 +222,13 @@ def make_jev_transport(
     usage: Mapping[str, int] | None = DEFAULT_USAGE,
     calls: list[dict[str, Any]] | None = None,
     api_key: str = "dummy",
+    known_models: frozenset[str] | None = None,
 ) -> httpx2.MockTransport:
-    """The offline transport of 15.3. `calls` (when given) collects one record per request, in order."""
+    """The offline transport of 15.3. `calls` (when given) collects one record per request, in order.
+
+    `known_models` (when given) makes the server answer 404 for any other model id - what the Step 0 `meta` suite's bogus
+    model id must run into.
+    """
     queue = list(faults)
     reported_usage: dict[str, Any] = {} if usage is None else dict(usage)
 
@@ -250,6 +255,8 @@ def make_jev_transport(
                     "headers": dict(request.headers),
                 }
             )
+        if known_models is not None and decoded.get("model") not in known_models:
+            return httpx2.Response(404, json={"error": f"unknown model {decoded.get('model')!r}"}, request=request)
         body: dict[str, Any] = {
             "model": model,
             "answers": copy.deepcopy(answer_fn(state, questions)),
