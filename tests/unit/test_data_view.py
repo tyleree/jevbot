@@ -15,7 +15,7 @@ from jevbot.cal import XnysCalendar
 from jevbot.data.series import NullNewsSource, PitTable, TableEventSource, TableNewsSource
 from jevbot.data.store import BARS_COLUMN_KNOWABLE, DAILY_COLUMN_KNOWABLE, DAILY_COLUMNS, DAILY_KEY
 from jevbot.data.view import DataView, bars_table_name, daily_table_name, volidx_table_name
-from jevbot.errors import DataUnavailable, PitViolation
+from jevbot.errors import DataError, DataUnavailable, PitViolation
 from jevbot.types import ChainSnapshot, Fidelity, NewsItem, ScheduledEvent, Slot, SnapshotKey
 from tests.fixtures.chain_factory import make_chain, xnys
 from tests.fixtures.fake_view import (
@@ -494,6 +494,65 @@ def test_opened_partitions_lists_the_files_the_view_actually_read() -> None:
     view.chain("SPY")
     view.chain("SPY")
     assert view.opened_partitions() == ("pq/daily/mirror/SPY.parquet", "pq/enriched/mirror/SPY/year=2024.parquet")
+
+
+def test_a_provider_without_the_partition_hook_still_works() -> None:
+    """`opened_partitions` is optional on a `ChainProvider` (the synthetic provider has no files at all)."""
+
+    class Minimal:
+        def __init__(self, chain: ChainSnapshot) -> None:
+            self._chain = chain
+
+        @property
+        def fidelity(self) -> Fidelity:
+            return self._chain.fidelity
+
+        @property
+        def source(self) -> str:
+            return "synthetic"
+
+        def underlyings(self) -> tuple[str, ...]:
+            return (self._chain.underlying,)
+
+        def keys(self, underlying: str, start: date, end: date) -> list[SnapshotKey]:
+            return [self._chain.key]
+
+        def get_chain(self, underlying: str, key: SnapshotKey) -> ChainSnapshot | None:
+            return self._chain if (underlying, key) == (self._chain.underlying, self._chain.key) else None
+
+        def manifest_hash(self) -> str:
+            return "minimal"
+
+    chain = make_chain("SPY", session=SESSION, calendar=xnys())
+    view = DataView(
+        key=chain.key,
+        as_of=chain.ts,
+        calendar=xnys(),
+        chains=Minimal(chain),
+        tables={},
+        news=NullNewsSource(),
+        events=TableEventSource.from_events([]),
+    )
+    assert view.chain("SPY").content_hash == chain.content_hash
+    assert view.opened_partitions() == ()
+    assert view.touched()[0].source == "synthetic.chain"
+
+
+def test_a_gap_in_the_previous_close_gives_no_open_ratio() -> None:
+    w = world(n_sessions=8)
+    bars = w.history.bars.copy()
+    bars.loc[bars["session"] < pd.Timestamp(SESSION), "close"] = 0.0  # a corrupt vendor row, not a price
+    broken = replace(w, history=History("SPY", w.history.daily, bars, w.history.iv30_bp))
+    assert broken.view.today_open_ratio("SPY") is None
+
+
+def test_a_mis_typed_close_column_is_refused_rather_than_rounded() -> None:
+    """`close_c` is integer cents (Conventions). A float column in the parquet is a data error, never a silent int()."""
+    w = world(n_sessions=8)
+    daily = w.history.daily.copy()
+    daily["close_c"] = daily["close_c"].astype("float64")
+    with pytest.raises(DataError, match="not an integer number of cents"):
+        w.with_daily(daily).view.close("SPY", w.cal.prev_session(SESSION))
 
 
 def test_a_naive_as_of_is_refused() -> None:

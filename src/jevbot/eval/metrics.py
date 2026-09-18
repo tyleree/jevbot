@@ -51,6 +51,7 @@ __all__ = [
     "jev_usage",
     "max_adverse_excursion",
     "max_drawdown",
+    "metrics_tree",
     "rejected_mid_only",
     "risk_normalised_pnl",
     "sharpe",

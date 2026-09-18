@@ -334,6 +334,8 @@ def two_strike_atm_iv(table: pd.DataFrame, expiry: date, fwd_c: int) -> float | 
     """
     if fwd_c <= 0:
         return None
+    if "expiry" not in table.columns:
+        raise DataError("two_strike_atm_iv needs an `expiry` column")
     block = table[pd.to_datetime(table["expiry"]) == pd.Timestamp(expiry)]
     if block.empty or "iv" not in block.columns:
         return None

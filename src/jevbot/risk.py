@@ -678,9 +678,18 @@ class DefaultRiskEngine:
         ev.record(cap_code, same_direction < cap, observed=same_direction, limit=cap, detail=direction.value)
 
     def _pending_opens(self, ev: _Eval) -> list[Structure]:
-        """Structures of the working OPEN intents and of the entries already approved this cycle."""
-        out = [i.structure for i in ev.pf.working if i.purpose is OrderPurpose.OPEN and i.structure is not None]
-        out += [o.intent.structure for o in ev.approved_so_far if o.intent.purpose is OrderPurpose.OPEN and o.intent.structure is not None]
+        """Structures of the working OPEN intents and of the entries already approved this cycle.
+
+        The order being approved is excluded: every repricing attempt is a NEW `approve()` call on the SAME intent (D18,
+        INV-09), and its own ledgered ORDER_INTENT must not count against it.
+        """
+        own = ev.intent.intent_id
+        out = [i.structure for i in ev.pf.working if i.purpose is OrderPurpose.OPEN and i.structure is not None and i.intent_id != own]
+        out += [
+            o.intent.structure
+            for o in ev.approved_so_far
+            if o.intent.purpose is OrderPurpose.OPEN and o.intent.structure is not None and o.intent.intent_id != own
+        ]
         return out
 
     # --- checks 13 / 14 ------------------------------------------------------------------------------------------------
@@ -754,28 +763,30 @@ class DefaultRiskEngine:
 
     def _pending_max_loss(self, ev: _Eval) -> Cents:
         total = 0
+        own = ev.intent.intent_id
         for intent in ev.pf.working:
-            if intent.purpose is OrderPurpose.OPEN and intent.structure is not None:
+            if intent.purpose is OrderPurpose.OPEN and intent.structure is not None and intent.intent_id != own:
                 total += structmath.max_loss_pc(intent.structure.kind, intent.structure.wing_widths, intent.limit_natural, 0) * intent.qty
         for order in ev.approved_so_far:
             structure = order.intent.structure
-            if order.intent.purpose is OrderPurpose.OPEN and structure is not None:
+            if order.intent.purpose is OrderPurpose.OPEN and structure is not None and order.intent.intent_id != own:
                 net = order.limit if order.limit is not None else order.intent.limit_natural
                 total += structmath.max_loss_pc(structure.kind, structure.wing_widths, net, 0) * order.qty
         return total
 
     def _pending_bp(self, ev: _Eval) -> Cents:
         total = 0
+        own = ev.intent.intent_id
         risk = self._cfg.risk
         for intent in ev.pf.working:
-            if intent.purpose is OrderPurpose.OPEN and intent.structure is not None:
+            if intent.purpose is OrderPurpose.OPEN and intent.structure is not None and intent.intent_id != own:
                 total += (
                     structmath.bp_required_pc(intent.structure.kind, intent.structure.wing_widths, intent.limit_natural, 0, risk)
                     * intent.qty
                 )
         for order in ev.approved_so_far:
             structure = order.intent.structure
-            if order.intent.purpose is OrderPurpose.OPEN and structure is not None:
+            if order.intent.purpose is OrderPurpose.OPEN and structure is not None and order.intent.intent_id != own:
                 net = order.limit if order.limit is not None else order.intent.limit_natural
                 total += structmath.bp_required_pc(structure.kind, structure.wing_widths, net, 0, risk) * order.qty
         return total

@@ -273,17 +273,18 @@ class _Session:
         self._rps.acquire(1)
         self._tokens.acquire(estimate)
         started = time.monotonic()
+        self.requests += 1  # ATTEMPTS, not successes: a failed attempt was reserved and may well have been billed
         try:
             # the raw-dict question form the SDK accepts (`normalize_questions` keeps our insertion order)
             resp = self._client.system_one(dict(state), cast("Mapping[str, Question]", asked), model=model or self.cfg.jev.model)
         except BaseException:
             self.spend.commit(reservation, estimate, estimated=True)
+            self.used_tokens += estimate
             raise
         latency_ms = int((time.monotonic() - started) * 1000)
         reported = resp.usage.input_tokens if resp.usage is not None else None
         self.spend.commit(reservation, estimate if reported is None else int(reported), estimated=reported is None)
         self.used_tokens += estimate if reported is None else int(reported)
-        self.requests += 1
         raw = resp.raw_http_response.json()
         wire = raw.get("answers") if isinstance(raw, Mapping) else None
         if not isinstance(wire, Mapping):
@@ -390,6 +391,15 @@ def _top_label(answer: Answer) -> str:
 
 
 def _max_abs_diff(a: Answer, b: Answer) -> float:
+    """The largest absolute probability difference between two answers to the SAME question.
+
+    Choices are compared **by label**, never by position: the `opt_perm` variant asks the same options in reversed order,
+    so `ChoiceAns.probs` (which follows the AUTHORED order) is reversed too - comparing positionally would report a
+    difference where the model gave exactly the same distribution.
+    """
+    if isinstance(a, ChoiceAns) and isinstance(b, ChoiceAns):
+        labels = set(a.probs) | set(b.probs)
+        return max((abs(a.probs.get(label, 0.0) - b.probs.get(label, 0.0)) for label in labels), default=0.0)
     left, right = _distribution(a), _distribution(b)
     if len(left) != len(right):  # pragma: no cover - the batches always ask the same questions
         return 1.0

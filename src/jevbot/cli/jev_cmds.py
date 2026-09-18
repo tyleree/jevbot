@@ -37,8 +37,10 @@ _log = logging.getLogger(__name__)
 app = typer.Typer(no_args_is_help=True, help="Jev decider: Step 0 probes, show-request, questions.")
 cache_app = typer.Typer(no_args_is_help=True, help="Decision cache: stats, verify.")
 
-YES_SPEND_TOKENS: Final = 5_000_000  # above this a probe run needs --yes-spend (the `backtest run` rule of 14 / 6.7)
-DEFAULT_MAX_TOKENS: Final = 7_000_000  # the documented Step 0 budget: about 2k requests, about $0.30
+# the documented Step 0 budget (6.8): about 2k requests, about 7M input tokens, about $0.30. Anything ABOVE it has to
+# be confirmed with --yes-spend, exactly as `backtest run` confirms a plan above its own threshold (14, 6.7).
+DEFAULT_MAX_TOKENS: Final = 7_000_000
+YES_SPEND_TOKENS: Final = DEFAULT_MAX_TOKENS
 
 
 # ======================================================================================================================
@@ -200,7 +202,7 @@ def probe_step0_cmd(
         int, typer.Option("--repeats", metavar="R", help="Repeats of the determinism suite.")
     ] = probe_module.DEFAULT_REPEATS,
     max_tokens: Annotated[int, typer.Option("--max-tokens", metavar="T", help="Input-token budget for this run.")] = DEFAULT_MAX_TOKENS,
-    yes_spend: Annotated[bool, typer.Option("--yes-spend", help="Confirm a budget above 5M input tokens.")] = False,
+    yes_spend: Annotated[bool, typer.Option("--yes-spend", help="Confirm a budget above the documented Step 0 default.")] = False,
 ) -> None:
     """Run the Step 0 live probes of 6.8 and write their keyed probe records (needs `TYPESAFE_API_KEY`)."""
     loaded = get_globals(ctx).load()

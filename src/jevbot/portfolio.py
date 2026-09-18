@@ -136,6 +136,7 @@ class Book:
         self._intents: dict[str, OrderIntent] = {}
         self._orders: dict[str, OrderState] = {}  # client_order_id -> latest state
         self._order_intent: dict[str, str] = {}  # client_order_id -> intent_id
+        self._filled: dict[str, int] = {}  # client_order_id -> quantity BOOKED by FILL entries (9.6)
         self._key: SnapshotKey | None = None
         self._session: date | None = None
         self._last_as_of: datetime | None = None
@@ -243,8 +244,13 @@ class Book:
         return intent_id in self._intents
 
     def filled_qty(self, client_order_id: str) -> int:
-        state = self._orders.get(client_order_id)
-        return 0 if state is None else state.filled_qty
+        """The cumulative quantity BOOKED by FILL entries for that order (9.6).
+
+        It is deliberately not the last ORDER_STATUS's `filled_qty`: the submit protocol records the broker's cumulative
+        quantity as soon as it is known, and `ingest_fills` measures its delta against what has actually been booked -
+        `delta = st.filled_qty - book.filled_qty(cid)`. The two differ exactly while a fill is known but not yet booked.
+        """
+        return self._filled.get(client_order_id, 0)
 
     def open_orders(self) -> tuple[tuple[OrderIntent, OrderState], ...]:
         """(intent, state) for every order whose latest status is not terminal, sorted by client_order_id.
@@ -395,6 +401,7 @@ class Book:
         for band in Band:
             self._cash[band] -= fill.net.get(band) * MULTIPLIER * fill.qty
         self._fees_accrued_micro += fill.fees_micro
+        self._filled[fill.client_order_id] = self._filled.get(fill.client_order_id, 0) + fill.qty
         if fill.purpose is OrderPurpose.OPEN:
             self._open_fill(fill)
         else:

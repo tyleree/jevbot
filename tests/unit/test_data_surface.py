@@ -772,3 +772,74 @@ def test_a_node_without_a_fit_contributes_a_flat_smile(cal: XnysCalendar) -> Non
     assert got[1] == "nd2_plain" and got[0] == pytest.approx(plain[0], abs=1e-9)  # no fit anywhere => the plain fallback
     node = flat_nodes[2]
     assert node.w_atm == pytest.approx((round(node.atm_iv * 1e4) / 1e4) ** 2 * node.tau_years)
+
+
+def test_the_last_node_is_used_exactly_and_extrapolated_beyond(cal: XnysCalendar) -> None:
+    """Beyond the last listed expiry the same standardised-moneyness rescaling applies, with `rho = tt / tt_n > 1`."""
+    chain = make_chain()
+    nodes = surface.chain_nodes(chain, cal)
+    last = nodes[-1]
+    assert last.fit is not None
+    strike = int(chain.spot * 1.02)
+
+    at_node = cal.open_close(last.last_session)[1]
+    tau = year_fraction(chain.ts, at_node)
+    forward = chain.spot * math.exp(chain.rate * tau)
+    k = math.log(strike / forward)
+    exact = surface.implied_prob_above(chain, strike, at_node, cal)
+    assert exact is not None and exact[1:] == ("smile_digital", "interpolated")
+    assert exact[0] == pytest.approx(
+        digital_by_hand(forward=forward, strike=strike, tau=tau, w=last.fit.w(k), dw_dk=last.fit.dw_dk(k)), abs=1e-9
+    )
+
+    beyond = cal.open_close(cal.next_session(last.last_session, 10))[1]
+    tau_b = year_fraction(chain.ts, beyond)
+    tt_b = trading_time(cal, chain.ts, beyond)
+    rho = tt_b / last.tt_sessions
+    assert rho > 1.0
+    forward_b = chain.spot * math.exp(chain.rate * tau_b)
+    k_b = math.log(strike / forward_b)
+    root = math.sqrt(rho)
+    got = surface.implied_prob_above(chain, strike, beyond, cal)
+    assert got is not None and got[1:] == ("smile_digital", "extrapolated")
+    assert got[0] == pytest.approx(
+        digital_by_hand(
+            forward=forward_b, strike=strike, tau=tau_b, w=rho * last.fit.w(k_b / root), dw_dk=root * last.fit.dw_dk(k_b / root)
+        ),
+        abs=1e-9,
+    )
+
+
+def test_a_fitted_total_variance_that_goes_negative_on_its_range_is_refused() -> None:
+    """6.4 step 1's last condition, written out: `w(k) > 0` everywhere on `[k_lo, k_hi]`, vertex included."""
+    assert surface._positive_on(0.01, 0.0, 0.0, -0.2, 0.2)  # a flat, positive smile
+    assert surface._positive_on(0.01, 0.0, 0.5, -0.2, 0.2)  # convex, vertex at k = 0, w(0) = 0.01 > 0
+    assert not surface._positive_on(0.01, 0.0, -1.0, -0.2, 0.2)  # concave: w(+-0.2) = 0.01 - 0.04 < 0
+    assert not surface._positive_on(0.01, 0.4, 4.0, -0.2, 0.2)  # convex with the vertex INSIDE: w(-0.05) = 0.0 exactly
+    assert surface._positive_on(0.01, 0.4, 4.0, 0.0, 0.2)  # the same parabola, vertex outside the range
+    assert not surface._positive_on(float("nan"), 0.0, 0.0, -0.2, 0.2)
+
+
+def test_an_expiry_with_inconsistent_forwards_is_skipped(cal: XnysCalendar) -> None:
+    """Every row of an expiry carries the SAME parity forward (2.2). Two different values mean a corrupt partition."""
+    chain = make_chain()
+    expiry = chain.expiries()[2]
+    table = chain.table.copy()
+    rows = pd.to_datetime(table["expiry"]) == pd.Timestamp(expiry)
+    table.loc[rows & (table["right"] == "P"), "fwd"] = int(chain.forward(expiry)) + 7
+    assert surface.fit_smile(table, expiry, chain.ts, cal) is None
+    assert expiry not in {n.expiry for n in surface.surface_nodes(table, {}, chain.ts, cal, session=chain.key.session)}
+    assert surface.fit_smile(table.drop(columns=["fwd"]), expiry, chain.ts, cal) is None
+
+
+def test_the_two_strike_value_needs_solved_ivs(cal: XnysCalendar) -> None:
+    chain = make_chain()
+    expiry = chain.expiries()[2]
+    blank = chain.table.assign(iv=np.nan)
+    assert surface.two_strike_atm_iv(blank, expiry, chain.forward(expiry)) is None
+    assert surface.two_strike_atm_iv(chain.table.drop(columns=["iv"]), expiry, chain.forward(expiry)) is None
+    assert surface.two_strike_atm_iv(chain.table, date(2024, 5, 23), chain.forward(expiry)) is None  # not a listed expiry
+    # with no fits and no two-strike value there is no node at all
+    assert surface.surface_nodes(blank, {}, chain.ts, cal, session=chain.key.session) == []
+    with pytest.raises(DataError, match="needs an `expiry` column"):
+        surface.two_strike_atm_iv(chain.table.drop(columns=["expiry"]), expiry, chain.forward(expiry))

@@ -217,7 +217,7 @@ def ingest(
             _missing_order(ledger, book, intent, ledger_state, view, calendar, cfg, mode)
             continue
         previous = book.filled_qty(cid)
-        if state.status is not ledger_state.status or state.filled_qty != previous:
+        if state.status is not ledger_state.status or state.filled_qty != ledger_state.filled_qty:
             _write_status(
                 ledger,
                 book,

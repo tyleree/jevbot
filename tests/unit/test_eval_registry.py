@@ -21,6 +21,7 @@ from pathlib import Path
 import msgspec
 import pytest
 
+from jevbot.config import Config
 from jevbot.errors import ConfigError, EvalError, HoldoutViolation, PreregError
 from jevbot.eval import registry as reg
 from jevbot.types import EvidenceTier, Fidelity, FillRule, ProbeRecord, RunMeta, RunMode
@@ -578,6 +579,21 @@ def test_a_path_outside_the_repository_is_never_committed(tmp_path: Path) -> Non
     outside = tmp_path / "outside.toml"
     outside.write_text("x = 1\n")
     assert reg.git_path_committed(outside, root) is False
+
+
+def test_trial_gates_from_config_reads_the_enabled_pairs_and_the_recorded_facts(tmp_path: Path) -> None:
+    cfg = Config()
+    write_scan_facts(tmp_path, [scan_row("SPY", "iron_condor", 2024, 0.05)])
+    gates = reg.TrialGates.from_config(cfg, candidate_config_hash=CANDIDATE_HASH, data_dir=tmp_path, sdk_version=SDK)
+
+    assert len(gates.enabled_pairs) == len(cfg.universe.underlyings) * len(cfg.structures.enabled)
+    assert ("SPY", "iron_condor") in gates.enabled_pairs
+    assert gates.max_unsizeable_rate == pytest.approx(cfg.candidates.max_unsizeable_rate)
+    assert gates.scan_facts is not None
+    assert gates.scan_facts.latest_year() == 2024
+    assert gates.sdk_version == SDK
+    # without an explicit version the gate keys on the installed pin, never on "whatever was recorded"
+    assert reg.TrialGates.from_config(cfg, candidate_config_hash="other", data_dir=tmp_path).sdk_version == "0.6.0"
 
 
 def test_installed_sdk_version_is_the_pinned_one() -> None:

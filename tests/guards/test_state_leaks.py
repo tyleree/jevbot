@@ -23,6 +23,7 @@ from jevbot.config import Config, StateConfig, load_mask_terms
 from jevbot.state import StateBuilder
 from jevbot.types import (
     BandPrices,
+    Fidelity,
     BuiltState,
     EntryContext,
     Leg,
@@ -38,6 +39,7 @@ from jevbot.types import (
     StructureKind,
     Variant,
 )
+from tests.fixtures.chain_factory import DEFAULT_SESSION, snapshot_ts
 from tests.fixtures.fake_view import FakeView, make_view, news_item
 from tests.fixtures.news import cases
 
@@ -45,6 +47,7 @@ REPO: Final = Path(__file__).resolve().parents[2]
 MASK_TERMS_FILE: Final = REPO / "config" / "mask_terms.toml"
 UNDERLYINGS: Final[tuple[str, ...]] = ("SPY", "QQQ", "IWM")
 WORLDS: Final = 12
+N_SESSIONS: Final = 180  # >= data.min_history_sessions (126) plus the 5.3 windows
 POSITIONS_PER_WORLD: Final = 20
 TARGET_STATES: Final = 500
 
@@ -94,8 +97,15 @@ def _news(index: int, as_of: datetime) -> list[NewsItem]:
 def _world(index: int) -> FakeView:
     rng = _rng(index)
     spot = int(rng.integers(3_000, 90_000))
-    view = make_view(("SPY",), seed=index, spots={"SPY": spot}, news_covered=True)
-    return make_view(("SPY",), seed=index, spots={"SPY": spot}, news=_news(index, view.as_of), news_covered=True)
+    as_of = snapshot_ts(DEFAULT_SESSION, Slot.EOD, Fidelity.EOD_QUOTES)  # the chain factory's own snapshot time
+    return make_view(
+        ("SPY",),
+        seed=index,
+        n_sessions=N_SESSIONS,
+        spots={"SPY": spot},
+        news=_news(index, as_of),
+        news_covered=True,
+    )
 
 
 def _position(view: FakeView, index: int) -> Position:
@@ -160,11 +170,11 @@ def _position(view: FakeView, index: int) -> Position:
     )
 
 
-def _generated_states(terms: MaskTerms) -> list[tuple[str, BuiltState]]:
+def _generated_states(terms: MaskTerms, *, worlds: int = WORLDS) -> list[tuple[str, BuiltState]]:
     """(request kind, state) pairs from `WORLDS` seeded worlds - entry, entry_text, manage and manage_text."""
     builder = StateBuilder(Config(), terms, news_resolved=True)
     out: list[tuple[str, BuiltState]] = []
-    for index in range(WORLDS):
+    for index in range(worlds):
         view = _world(index)
         entry = builder.entry(view, "SPY")
         if entry is None:  # a world without the required features sends no request at all
@@ -260,7 +270,7 @@ def test_the_unmasked_diagnostic_is_the_only_way_an_identifier_reaches_a_state(t
 
 
 def test_the_generator_is_deterministic(terms: MaskTerms) -> None:
-    first = _generated_states(terms)[:20]
-    second = _generated_states(terms)[:20]
+    first = _generated_states(terms, worlds=2)
+    second = _generated_states(terms, worlds=2)
     assert [built.state_hash for _, built in first] == [built.state_hash for _, built in second]
     assert datetime.now(UTC).year >= 2024 and math.isfinite(1.0)  # nothing above reads a clock

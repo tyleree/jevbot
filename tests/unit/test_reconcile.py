@@ -10,7 +10,7 @@ import ast
 import textwrap
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,7 @@ import msgspec
 import pytest
 
 from jevbot import ids, reconcile
-from jevbot.cal import XnysCalendar, SimClock
+from jevbot.cal import SimClock, XnysCalendar
 from jevbot.config import Config
 from jevbot.errors import PaperGuardError
 from jevbot.portfolio import Book
@@ -30,16 +30,15 @@ from jevbot.types import (
     BrokerActivity,
     ChainSnapshot,
     EntryContext,
+    Fill,
     KillState,
     KillTrigger,
     LedgerKind,
     Leg,
     LegFill,
-    OptionContract,
     OrderIntent,
     OrderLeg,
     OrderPurpose,
-    OrderState,
     OrderStatus,
     PositionIntent,
     Right,
@@ -50,7 +49,7 @@ from jevbot.types import (
     Structure,
     StructureKind,
 )
-from tests.fixtures.chain_factory import contract_at, make_chain, quote_of, set_quote, target_expiry
+from tests.fixtures.chain_factory import contract_at, make_chain, set_quote, target_expiry
 from tests.fixtures.fake_broker import FakeBroker, quote_tape
 from tests.fixtures.fake_view import FakeView
 from tests.fixtures.memory_ledger import MemoryLedger
@@ -85,8 +84,8 @@ class StubFillModel:
     """A minimal `FillModel` (3.4): the worst band on both sides, the mid for `mid`, a flat fee. WP06 owns the real one."""
 
     def check(self, legs: Sequence[OrderLeg], qty: int, chain: ChainSnapshot, *, mandatory: bool) -> tuple[str, ...]:
-        del qty, chain, mandatory
-        return () if legs else ()
+        del legs, qty, chain, mandatory
+        return ()
 
     def price(self, legs: Sequence[OrderLeg], chain: ChainSnapshot, *, mandatory: bool) -> tuple[BandPrices, tuple[LegFill, ...], str]:
         del mandatory
@@ -270,9 +269,36 @@ def ledger_intent(w: World, intent: OrderIntent) -> None:
 
 
 def approve(w: World, intent: OrderIntent, *, attempt: int = 0, limit: int | None = None) -> ApprovedOrder:
-    _, order = w.engine.approve(intent, w.book.state(), VIEW, now=CLOSE, attempt=attempt, limit=limit)
-    assert order is not None
+    verdict, order = w.engine.approve(intent, w.book.state(), VIEW, now=CLOSE, attempt=attempt, limit=limit)
+    assert order is not None, verdict.reject_codes
     return order
+
+
+def force_position(w: World, intent: OrderIntent, *, qty: int, net: BandPrices | None = None) -> None:
+    """Book a fill without the engine - for a position `approve()` would no longer build (one expiring today, say)."""
+    ledger_intent(w, intent)
+    fill = Fill(
+        fill_id=f"forced-{intent.intent_id}",
+        client_order_id=f"{intent.intent_id}-00",
+        intent_id=intent.intent_id,
+        decision_id=intent.decision_id,
+        position_id=intent.position_id,
+        purpose=intent.purpose,
+        structure_id=intent.structure.structure_id if intent.structure is not None else None,
+        qty=qty,
+        key=intent.key,
+        ts=CLOSE,
+        net=net if net is not None else BandPrices(orats=-246, worst=-246, mid=-250),
+        legs=tuple(LegFill(occ=leg.contract.occ, side=leg.side, bid=100, ask=104, orats=102, worst=102, mid=102) for leg in intent.legs),
+        fees_micro=0,
+        forced=False,
+        model_reject=(),
+        quality="ok",
+        source="sim",
+        broker_order_id=None,
+        broker_net=None,
+    )
+    w.book.apply(w.ledger.append(LedgerKind.FILL, intent.session, CLOSE, msgspec.to_builtins(fill)))
 
 
 # ======================================================================================================================
@@ -610,9 +636,9 @@ def test_r6_also_looks_at_the_ledgers_own_legs() -> None:
     )
     w = world()
     intent = open_intent(qty=1, structure=expiring)
-    ledger_intent(w, intent)
-    reconcile.submit_approved(w.ledger, w.book, w.broker, approve(w, intent), CLOSE)
-    w.ingest()
+    force_position(w, intent, qty=1)  # the engine would refuse to OPEN this: check 10 is exactly what R6 back-stops
+    for leg in expiring.legs:
+        w.broker.set_position(leg.contract.occ, 1 if leg.side is Side.BUY else -1)
     assert w.reconcile() is False
     assert any(trigger is KillTrigger.EXPIRY_VIOLATION for trigger, _ in w.kill.trips)
 
