@@ -154,6 +154,76 @@ def _resampled(x: FloatArray, indices: IntArray) -> FloatArray:
     return np.asarray(x[indices], dtype=np.float64)
 
 
+class Interval(tuple[float, float, float]):
+    """`(point, ci_lo, ci_hi)` - the plain 3-tuple of the 12.5 signature, plus the replicate bookkeeping.
+
+    `n_degenerate` counts the replicates on which the **statistic** was undefined.  It can never be caused by a
+    non-finite observation: every series is checked up front (`_require_finite`), because 12.1 `missing` requires void /
+    unscorable sessions to be *excluded and listed* by the caller rather than dropped, replicate by replicate, inside
+    the resampler - silently taking the bound over the surviving replicates is a selection-biased answer to a
+    pre-registered go / no-go question.
+    """
+
+    reps: int
+    n_degenerate: int
+
+    def __new__(cls, point: float, lo: float, hi: float, *, reps: int, n_degenerate: int = 0) -> Interval:
+        self = tuple.__new__(cls, (float(point), float(lo), float(hi)))
+        self.reps = int(reps)
+        self.n_degenerate = int(n_degenerate)
+        return self
+
+    @property
+    def point(self) -> float:
+        return self[0]
+
+    @property
+    def ci_lo(self) -> float:
+        return self[1]
+
+    @property
+    def ci_hi(self) -> float:
+        return self[2]
+
+
+def _require_finite(x: FloatArray, name: str) -> None:
+    """Refuse a series that carries a non-finite observation, naming the positions (12.1 `missing`).
+
+    `eval.calibration.loss_differential` yields `NaN` for a session on which a primary question has no usable row, and
+    `eligible_sessions` still calls that session eligible (eligibility is defined on reference availability alone,
+    12.1 `eligible_session`).  Such a session must be dropped **and listed** by the caller - see
+    `eval.calibration.exclude_unscorable_sessions` - never absorbed by a replicate filter.
+    """
+    bad = np.flatnonzero(~np.isfinite(x))
+    if bad.size == 0:
+        return
+    shown = ", ".join(str(int(i)) for i in bad[:20].tolist())
+    more = "" if bad.size <= 20 else f", ... ({int(bad.size)} in total)"
+    raise EvalError(
+        f"{name} is non-finite at positions [{shown}]{more}: exclude and list those sessions before taking a bound "
+        "(12.1 `missing`; `jevbot.eval.calibration.exclude_unscorable_sessions` does the split)"
+    )
+
+
+def _check_degenerate(n_degenerate: int, total: int, max_frac: float, what: str) -> None:
+    """Refuse a bound taken over a materially selection-biased subset of the replicates.
+
+    The default `max_degenerate_frac = 0.0` is fail-closed: with a finite input series the mean - the pre-registered
+    statistic - can never be undefined, so a dropped replicate means a *statistic* that is undefined on some resamples
+    and the caller has to opt into tolerating it.
+    """
+    if not 0.0 <= max_frac < 1.0:
+        raise EvalError(f"max_degenerate_frac must be in [0, 1): {max_frac!r}")
+    if n_degenerate and n_degenerate > max_frac * total:
+        raise EvalError(
+            f"the statistic was undefined on {n_degenerate} of {total} {what} replicates (allowed: {max_frac:.1%}): "
+            "the surviving replicates are a selection-biased subset of the bootstrap distribution - fix the statistic, "
+            "or raise `max_degenerate_frac` deliberately and report `Interval.n_degenerate`"
+        )
+    if n_degenerate >= total:
+        raise EvalError(f"every {what} replicate was degenerate")
+
+
 def bootstrap_ci(
     x: npt.ArrayLike,
     stat: Callable[[FloatArray], float] = _mean,

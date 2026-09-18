@@ -12,13 +12,19 @@ fractions are read as the exact decimals the operator wrote (`Fraction(repr(x))`
   quote. Property (`tests/property/test_prop_fills.py`): for a buy `bid <= mid <= orats <= worst = ask`; for a sell the reverse.
 * 10.4 usability is PER SIDE. `no_quote` = a BUY leg without an ask, or a SELL leg of an OPEN order with `bid <= 0`. A SELL leg
   of a CLOSE / KILL order (`sell_to_close`) with `bid == 0 < ask` is NOT a reject: it is sold at 0 on all three bands (the ORATS
-  interpolation is deliberately not used there: nobody pays inside a zero-bid market). Rejection never looks at a band, so the
-  trade list is identical across bands. Forced fills (mandatory exits, kill) are never rejected: every usable leg is priced at the
-  worst band plus `max(1 tick, cdiv(spread * forced_penalty_frac_spread))`; a leg without a usable quote is priced at the no-quote
-  fallback (SELL `max(intrinsic - pad, 0)`, BUY `max(intrinsic, last mark) + pad`) and the fill is `degraded`.
+  interpolation is deliberately not used there: nobody pays inside a zero-bid market). Every rule of 10.4 is evaluated on its own
+  and `check` returns EVERY code that matches, so a BUY leg quoted `100 x 0` is both `no_quote` (rule (a): no ask) and
+  `crossed_or_locked`. Rejection never looks at a band, so the trade list is identical across bands. Forced fills (mandatory
+  exits, kill) are never rejected: every usable leg is priced at the worst band plus
+  `max(1 tick, cdiv(spread * forced_penalty_frac_spread))`; a leg without a usable quote is priced at the no-quote fallback
+  (SELL `max(intrinsic - pad, 0)`, BUY `max(intrinsic, last mark) + pad`) and the fill is `degraded`.
 * 10.5 marks: `liq_value = sum(ask of short legs) - sum(bid of long legs)` (what closing would COST now), `mid_value` likewise at
   mids. A long leg with `bid == 0` is a VALID mark of 0. A leg is unusable only when its quote is missing, a short leg has no ask,
   or the quote is crossed / locked with a positive bid; then the previous values are kept (`stale = True`).
+* Ratios. `Leg.ratio` / `OrderLeg.ratio` is always 1 in v1 (2.3, 2.4; risk check 4 of 9.1 admits no other structure) and `LegFill`
+  carries no ratio, so a signed net per band could not be replayed from the ledger for a ratio leg: an order leg with any other
+  ratio is refused here rather than half-priced. `liquidation` works on a `Structure` and weights each leg by its ratio anyway,
+  so a mark stays correct if ratios are ever admitted.
 * 10.7 fees per fill through `structmath.fill_fees_micro` (the ONE fee arithmetic); the end-of-day charge is `cdiv(accrued, 10_000)`.
 
 Import rules (section 1): no network library, no IO; `fills.py` imports only `config`, `errors`, `money`, `structmath`, `types`, `vocab`.
@@ -180,12 +186,26 @@ def _is_crossed(q: Quote) -> bool:
 
 
 def _usable_on_side(leg: OrderLeg, q: Quote) -> bool:
-    """Per-side usability of 10.4: BUY needs an ask (`usable_buy`); SELL-to-open needs a bid too; SELL-to-close needs only an ask."""
+    """Per-side usability of 10.4 for PRICING: BUY needs an ask (`usable_buy`); SELL-to-open needs a bid too; SELL-to-close
+    needs only an ask. A crossed / locked row is unusable on both sides (`usable_*` require `ask > bid`)."""
     if leg.side is Side.BUY:
         return q.usable_buy()
     if leg.position_intent is PositionIntent.STO:
         return q.bid > 0 and q.usable_sell_close()  # we never open by selling into a zero bid
     return q.usable_sell_close()
+
+
+def _is_no_quote(leg: OrderLeg, q: Quote) -> bool:
+    """The `no_quote` rule of 10.4, evaluated on its own (never as the `else` of the crossed rule).
+
+    10.4 lists (a) any BUY leg without an ask (`ask <= 0`) and (b) a SELL leg of an OPEN order with `bid <= 0`. A market with no
+    ask at all is (a)'s mirror on the sell side: the zero-bid sell-to-close exemption is stated for `bid == 0` **and `ask > 0`**,
+    so a `0 x 0` row is no quote whichever side we are on. Both rules ignore crossing, so a BUY quoted `100 x 0` yields
+    `no_quote` AND `crossed_or_locked` - the funnel must not attribute a genuinely absent ask to the wrong reason.
+    """
+    if q.ask <= 0:
+        return True
+    return leg.side is Side.SELL and leg.position_intent is PositionIntent.STO and q.bid <= 0
 
 
 def _is_zero_bid_close(leg: OrderLeg, q: Quote) -> bool:

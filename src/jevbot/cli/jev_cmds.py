@@ -30,7 +30,7 @@ from jevbot.jev.cache import SqliteDecisionCache
 from jevbot.jev.spend import SCOPES, SpendGuard
 from jevbot.types import RequestKind, Variant
 
-__all__ = ["YES_SPEND_TOKENS", "app", "cache_app"]
+__all__ = ["YES_SPEND_TOKENS", "app", "cache_app", "cost_micros"]
 
 _log = logging.getLogger(__name__)
 
@@ -41,6 +41,8 @@ cache_app = typer.Typer(no_args_is_help=True, help="Decision cache: stats, verif
 # be confirmed with --yes-spend, exactly as `backtest run` confirms a plan above its own threshold (14, 6.7).
 DEFAULT_MAX_TOKENS: Final = 7_000_000
 YES_SPEND_TOKENS: Final = DEFAULT_MAX_TOKENS
+# the 6.7 list price, in micro-dollars per 1000 input tokens ($0.042 per million)
+MICROS_PER_THOUSAND_INPUT_TOKENS: Final = 42
 
 
 # ======================================================================================================================
@@ -266,6 +268,14 @@ def _spend_config() -> Any:
     return JevSpendConfig()
 
 
+def cost_micros(input_tokens: int) -> int:
+    """The recorded input-token cost in MICRO-dollars at the 6.7 list price ($0.042 per million input tokens).
+
+    Integer money, as everywhere else: 0.042 USD / 1e6 tokens = 42 micro-dollars per 1000 tokens.
+    """
+    return input_tokens * MICROS_PER_THOUSAND_INPUT_TOKENS // 1000
+
+
 @cache_app.command("stats")
 def cache_stats_cmd(
     ctx: typer.Context,
@@ -280,12 +290,15 @@ def cache_stats_cmd(
         manifests = {name: cache.manifest_hash(name) for name in breakdown.get("namespaces", {})}
     finally:
         cache.close()
+    spend_by_day = _spend_summary(loaded.data_dir)
     payload: dict[str, Any] = {
         "namespace": namespace,
         "counts": counts,
+        "cost_micros": cost_micros(counts["input_tokens"]),
         "breakdown": breakdown,
         "manifest_hashes": manifests,
-        "spend_by_day": _spend_summary(loaded.data_dir),
+        "spend_by_day": spend_by_day,
+        "spend_cost_micros": {scope: cost_micros(sum(days.values())) for scope, days in spend_by_day.items()},
     }
     if get_globals(ctx).json:
         typer.echo(json_module.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -293,11 +306,12 @@ def cache_stats_cmd(
     typer.echo(f"decision cache: {loaded.data_dir / 'cache' / 'decisions.sqlite'}")
     for key, value in counts.items():
         typer.echo(f"  {key}: {value}")
+    typer.echo(f"  recorded input-token cost: ${cost_micros(counts['input_tokens']) / 1e6:.4f}")
     for label, table in breakdown.items():
         typer.echo(f"  {label}: " + (", ".join(f"{k}={v}" for k, v in table.items()) or "-"))
     for name, digest in manifests.items():
         typer.echo(f"  manifest {name}: {digest}")
-    for scope, days in _spend_summary(loaded.data_dir).items():
+    for scope, days in spend_by_day.items():
         typer.echo(f"  spend[{scope}]: " + (", ".join(f"{day}={tokens}" for day, tokens in days.items()) or "-"))
 
 

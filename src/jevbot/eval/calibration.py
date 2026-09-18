@@ -62,6 +62,7 @@ __all__ = [
     "coherence",
     "ece",
     "eligible_sessions",
+    "exclude_unscorable_sessions",
     "impute_missing",
     "ineligible_sessions",
     "log_loss",
@@ -576,16 +577,25 @@ def question_kind(question_id: str) -> str:
     return head + sep + tail
 
 
+def _is_missing(value: Any) -> bool:
+    """`True` for the three spellings of "no date": `None`, a float `NaN` and `pandas.NaT`.
+
+    `NaTType` subclasses `datetime.datetime`, so an `isinstance(value, date)` test **accepts NaT** and the sort that
+    follows dies with a raw `TypeError` instead of a diagnostic.  A still-open forecast is a legitimate row of the
+    calibration frame (12.3 reports "N resolved / open / void / missing"), and `eval.load` spells its `resolved_on` as
+    `NaT` on a datetime64 column, so this has to be handled, not merely survived.  `pd.isna` catches all three.
+    """
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):  # pragma: no cover - defensive: a non-scalar is not a date either
+        return False
+
+
 def _dates(values: Iterable[Any]) -> list[date]:
-    out: list[date] = []
-    for value in values:
-        if isinstance(value, date) and not isinstance(value, pd.Timestamp):
-            out.append(value)
-        elif value is None or (isinstance(value, float) and not np.isfinite(value)):
-            continue
-        else:
-            out.append(pd.Timestamp(value).date())
-    return out
+    """The `datetime.date` values of a column with the missing ones **dropped** (shorter than the input)."""
+    return [day for day in _dates_or_none(values) if day is not None]
 
 
 def session_grid(events: pd.DataFrame, history: pd.DataFrame | None = None) -> list[date]:
@@ -668,11 +678,14 @@ def _training_pairs(
 
 
 def _dates_or_none(values: Iterable[Any]) -> list[date | None]:
+    """The `datetime.date` values of a column, **positionally aligned** with it: a missing date stays as `None`.
+
+    This is the one date reader of the module (`_dates` drops the `None`s of this list), so the purge, the session grid
+    and the eligibility rule can never disagree about what counts as a date.
+    """
     out: list[date | None] = []
     for value in values:
-        if value is None:
-            out.append(None)
-        elif isinstance(value, float) and not np.isfinite(value):
+        if _is_missing(value):
             out.append(None)
         elif isinstance(value, date) and not isinstance(value, pd.Timestamp):
             out.append(value)
@@ -881,11 +894,12 @@ def eligible_sessions(events: pd.DataFrame, refs: Mapping[str, FloatArray], prim
         available &= np.isfinite(np.asarray(values, dtype=np.float64))
 
     question_ids = np.asarray([str(v) for v in events["question_id"].tolist()])
-    event_sessions = np.asarray(_dates(events["session"].tolist()), dtype=object)
+    # positional, so the boolean masks stay aligned with `refs` even when a row carries no session (NaT / None)
+    event_sessions = np.asarray(_dates_or_none(events["session"].tolist()), dtype=object)
     wanted = set(primary)
 
     eligible: list[date] = []
-    for day in sorted(set(event_sessions.tolist())):
+    for day in sorted({day for day in event_sessions.tolist() if day is not None}):
         on_day = event_sessions == day
         ok = True
         for qid in wanted:
@@ -932,11 +946,15 @@ def loss_differential(
     `p_a` is the REFERENCE and `p_b` the evaluated forecaster, so `d_t > 0` means the forecaster beat the reference.
     Rows with a non-finite `y` (void outcomes) are excluded; a session on which a question has no usable row yields
     `NaN` for that session.  The result is ordered by `unique_sessions(sessions)`.
+
+    Such a `NaN` is **not** a value the bound may average away: 12.1 `missing` says void outcomes are *excluded and
+    listed*, so the caller splits the series with `exclude_unscorable_sessions` and reports the dropped sessions.
+    `jevbot.eval.bootstrap.lower_bound` refuses a non-finite series outright.
     """
     pa = _as_prob(p_a, "p_a", allow_nan=True)
     pb = _as_prob(p_b, "p_b", allow_nan=True)
     ya = _as_float(y)
-    session_list = _dates(sessions)
+    session_list = _dates_or_none(sessions)  # positional: a row without a session is aligned, then never on any day
     qid_list = [str(v) for v in question_ids]
     n = _same_length(p_a=pa, p_b=pb, y=ya)
     if len(session_list) != n or len(qid_list) != n:
@@ -964,3 +982,20 @@ def loss_differential(
         if complete and per_question:
             out[pos] = float(np.mean(per_question))
     return out
+
+
+def exclude_unscorable_sessions(d: npt.ArrayLike, sessions: pd.Index) -> tuple[FloatArray, pd.Index, pd.Index]:
+    """Split a `d_t` series into the scorable values and the sessions that have no usable row (12.1 `missing`).
+
+    Returns `(kept_values, kept_sessions, dropped_sessions)`.  A session whose `d_t` is `NaN` - every primary question
+    void or missing on it - is **excluded and listed**, exactly as the pre-registration requires; it is never averaged
+    away inside the resampler, and `jevbot.eval.bootstrap.lower_bound` refuses a series that still carries one.
+    """
+    values = np.asarray(d, dtype=np.float64).ravel()
+    if int(values.size) != len(sessions):
+        raise EvalError(f"d_t has {values.size} values, sessions has {len(sessions)}")
+    keep = np.isfinite(values)
+    labels = list(sessions)
+    kept = pd.Index([labels[i] for i in np.flatnonzero(keep).tolist()], name=sessions.name)
+    dropped = pd.Index([labels[i] for i in np.flatnonzero(~keep).tolist()], name=sessions.name)
+    return np.asarray(values[keep], dtype=np.float64), kept, dropped

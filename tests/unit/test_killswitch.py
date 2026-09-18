@@ -154,7 +154,9 @@ def spread(short_milli: int, long_milli: int) -> Structure:
     )
 
 
-SPREADS = tuple(spread(436_000 - 2_000 * i, 431_000 - 2_000 * i) for i in range(6))
+# six disjoint put credit spreads whose strikes never touch the condor's legs (411 / 427 / 472 / 481): two structures
+# sharing a strike would net out in the BROKER's holdings and could not be grouped back into structures (9.5 K3)
+SPREADS = tuple(spread(450_000 - 2_000 * i, 445_000 - 2_000 * i) for i in range(6))
 CONDOR = make_structure(CHAIN, StructureKind.IRON_CONDOR)
 ALL_LEGS = tuple(str(occ) for occ in CHAIN.table["occ"])  # the broker quotes the whole chain, as a real one does
 

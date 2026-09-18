@@ -317,8 +317,11 @@ def test_cache_stats_and_verify_commands(data_dir: Path) -> None:
     assert payload["breakdown"]["request_kinds"] == {"entry": len(rows)}
     assert set(payload["spend_by_day"]) == {"paper", "batch"}
     assert payload["manifest_hashes"][NAMESPACE]
+    # integer money: 1234 input tokens at $0.042 per million = 1234 * 42 // 1000 = 51 micro-dollars
+    assert payload["counts"]["input_tokens"] == 1234 and payload["cost_micros"] == 51
+    assert jev_cmds.cost_micros(1_000_000) == 42_000 and jev_cmds.cost_micros(0) == 0
     plain = _run(["stats"], data_dir)
-    assert plain.exit_code == 0 and "answers: 19" in plain.output
+    assert plain.exit_code == 0 and "answers: 19" in plain.output and "recorded input-token cost: $0.0001" in plain.output
     verified = _run(["verify"], data_dir, as_json=True)
     assert verified.exit_code == 0 and json.loads(verified.output)["ok"] is True
     assert _run(["verify"], data_dir).exit_code == 0
