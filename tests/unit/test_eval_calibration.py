@@ -577,9 +577,7 @@ def test_still_open_rows_are_missing_dates_not_dates_on_a_datetime64_frame() -> 
         session=[v.date() for v in events["session"]],
         resolved_on=[None if pd.isna(v) else v.date() for v in events["resolved_on"]],
     )
-    history_objects = history.assign(
-        session=[v.date() for v in history["session"]], resolved_on=[v.date() for v in history["resolved_on"]]
-    )
+    history_objects = history.assign(session=[v.date() for v in history["session"]], resolved_on=[v.date() for v in history["resolved_on"]])
     for min_events in (250,):
         assert np.allclose(
             cal.base_rate_expanding(events, history, min_events=min_events),
@@ -593,7 +591,7 @@ def test_still_open_rows_are_missing_dates_not_dates_on_a_datetime64_frame() -> 
         )
     refs = cal.build_references(events, history, recal_min_events=250, base_rate_min_events=250, refit_sessions=21)
     eligible = cal.eligible_sessions(events, {k: refs[k] for k in ("implied_recalibrated", "base_rate_expanding")}, QUESTIONS)
-    assert list(eligible) == sorted(set(v.date() for v in events["session"]))
+    assert list(eligible) == sorted({v.date() for v in events["session"]})
 
 
 def test_a_missing_session_never_becomes_an_eligible_day() -> None:
@@ -601,7 +599,7 @@ def test_a_missing_session_never_becomes_an_eligible_day() -> None:
     rng = np.random.default_rng(114)
     history = _stamped(_history_frame(rng, n_sessions=260, start=0))
     events = _stamped(_events_frame(rng, n_sessions=4, start=261, p_forecast=0.12))
-    events.loc[events.index[0], "session"] = pd.NaT
+    events.loc[events["session"] == events["session"].min(), "session"] = pd.NaT
 
     assert len(cal.unique_sessions(events["session"].tolist())) == 3
     refs = cal.build_references(events, history, recal_min_events=250, base_rate_min_events=250, refit_sessions=21)

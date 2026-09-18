@@ -140,6 +140,7 @@ class BrokerClock:
         self._boottime_at_sync: float = 0.0
         self._last_boottime: float = 0.0
         self._unsynced: bool = True
+        self._slept: bool = False
         self._skew_high_since: float | None = None
 
     # --- state ---------------------------------------------------------------------------------------------------------
@@ -148,6 +149,19 @@ class BrokerClock:
     def synced(self) -> bool:
         """False before the first sync and after a detected host sleep (11.4)."""
         return not self._unsynced and self._reading is not None
+
+    @property
+    def slept(self) -> bool:
+        """True once a boottime gap larger than `boottime_gap_s` has been observed, by `now()` OR by `sync()` (11.4).
+
+        Sticky on purpose: the consequence of a wake is "re-sync **and reconcile** before anything else", and only the runner
+        can do the reconcile. It stays True until `acknowledge_sleep()`.
+        """
+        return self._slept
+
+    def acknowledge_sleep(self) -> None:
+        """Clear `slept`. The runner calls this once it has re-synced AND reconciled after a detected wake (11.4)."""
+        self._slept = False
 
     @property
     def needs_sync(self) -> bool:
@@ -188,6 +202,7 @@ class BrokerClock:
         current = self._boottime()
         if current - self._last_boottime > self._boottime_gap_s:
             self._unsynced = True
+            self._slept = True  # 11.4: a wake means re-sync AND reconcile; `sync()` alone must not clear the second half
         self._last_boottime = current
         return self._broker_ts + timedelta(seconds=current - self._boottime_at_sync)
 
@@ -196,9 +211,15 @@ class BrokerClock:
         return self._reading
 
     def sync(self) -> ClockReading:
-        """Force a broker re-sync. Round-trip compensated: the skew is measured against local UTC at the midpoint of the call."""
+        """Force a broker re-sync. Round-trip compensated: the skew is measured against local UTC at the midpoint of the call.
+
+        The same midpoint anchors `now()`: `broker_ts` is the broker's time at `(t0 + t1) / 2`, so extrapolating from `t1`
+        would put every reading `rtt / 2` in the past (11.4).
+        """
         t0 = self._boottime()
         local0 = self._utcnow()
+        if self._reading is not None and t0 - self._last_boottime > self._boottime_gap_s:
+            self._slept = True  # 11.4: sync() is usually the FIRST call after a wake; the gap must not die here
         raw = self._fetch()
         t1 = self._boottime()
 
@@ -218,11 +239,11 @@ class BrokerClock:
         )
         self._reading = reading
         self._broker_ts = broker_ts
-        self._boottime_at_sync = t1
+        self._boottime_at_sync = t0 + rtt_s / 2  # the instant `broker_ts` refers to, NOT the end of the round trip
         self._last_boottime = t1
         self._unsynced = False
         if skew_ms > self._max_skew_ms:
-            self._skew_high_since = t1 if self._skew_high_since is None else self._skew_high_since
+            self._skew_high_since = self._boottime_at_sync if self._skew_high_since is None else self._skew_high_since
         else:
             self._skew_high_since = None
         return reading
@@ -246,9 +267,11 @@ class _Session:
 class AlpacaCalendar:
     """`Calendar` (3.1) over the broker's own `get_calendar()` rows, cross-checked against XNYS (11.4, G4).
 
-    The vendor rows are the authority for WHICH days the paper account can trade - they are the venue's own calendar - but
-    the close is the EARLIER of the vendor's and XNYS's whenever both know the session, and every disagreement (a session
-    only one calendar has, or a differing close) is reported through `alerts` and to the injected `on_alert` hook.
+    The close is the EARLIER of the vendor's and XNYS's whenever both know the session, the session set is the UNION of the
+    two calendars, and every disagreement (a session only one calendar has, or a differing close) is reported through
+    `alerts` and to the injected `on_alert` hook. The union is the safe direction in both senses: a day only the broker
+    lists is a day the account really can trade, and a day only the exchange calendar lists still gets its cycle - so a
+    mandatory-exit day (INV-11) or a hard-exit deadline can never vanish because one calendar was wrong or stale (INV-21).
 
     A date outside the loaded range raises `ValueError`, never a silent "not a session": beyond the horizon the true answer
     is unknown (the same contract as `cal.XnysCalendar`).
@@ -279,7 +302,7 @@ class AlpacaCalendar:
         self._closes: Final[tuple[datetime, ...]] = tuple(s.close for s in self._sessions)
         self._lo: Final[date] = self._sessions[0].day
         self._hi: Final[date] = self._sessions[-1].day
-        self._regular_close: Final[DayTime] = self._modal_close()
+        self._regular_close: Final[DayTime] = self._longest_close()
         for alert in self._alerts:
             if on_alert is not None:
                 on_alert(alert)
@@ -307,7 +330,7 @@ class AlpacaCalendar:
         return value.replace(tzinfo=EXCHANGE_TZ).astimezone(UTC)
 
     def _apply_cross_check(self, sessions: list[_Session], other: Calendar) -> list[_Session]:
-        """Earlier close wins; every disagreement is an alert (G4)."""
+        """Earlier close wins, the session set is the union, every disagreement is an alert (G4)."""
         checked: list[_Session] = []
         for session in sessions:
             try:
@@ -333,8 +356,27 @@ class AlpacaCalendar:
             checked.append(session)
         known = {s.day for s in sessions}
         for missing in self._cross_check_only(other, known):
-            self._alerts.append(f"calendar disagreement on {missing.isoformat()}: the cross-check lists a session the broker does not")
+            self._alerts.append(
+                f"calendar disagreement on {missing.isoformat()}: the cross-check lists a session the broker does not; "
+                "it is KEPT as a session, because a day we call a non-session gets no cycle at all (INV-11, INV-21)"
+            )
+            checked.append(self._session_from_cross_check(other, missing))
+        checked.sort(key=lambda s: s.ordinal)
         return checked
+
+    @staticmethod
+    def _session_from_cross_check(other: Calendar, day: date) -> _Session:
+        """A session only the cross-check knows, on the cross-check's own (tz-aware UTC) open and close."""
+        try:
+            open_ts, close_ts = other.open_close(day)
+        except ValueError as exc:
+            raise BrokerError(f"the cross-check calendar lists {day.isoformat()} as a session but cannot give its hours: {exc}") from exc
+        for what, value in (("open", open_ts), ("close", close_ts)):
+            if not isinstance(value, datetime) or value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+                raise BrokerError(f"the cross-check calendar returned a naive {what} for {day.isoformat()}")
+        if not open_ts < close_ts:
+            raise BrokerError(f"the cross-check calendar has {day.isoformat()} closing at or before it opens")
+        return _Session(day, open_ts.astimezone(UTC), close_ts.astimezone(UTC))
 
     @staticmethod
     def _cross_check_only(other: Calendar, known: set[date]) -> list[date]:
@@ -346,10 +388,14 @@ class AlpacaCalendar:
             return []
         return [d for d in theirs if d not in known]
 
-    def _modal_close(self) -> DayTime:
-        """The exchange-local time of day most sessions close at; anything earlier is an early close (no literal, INV-13)."""
-        counts = Counter(_local_close(s.close) for s in self._sessions)
-        return counts.most_common(1)[0][0]
+    def _longest_close(self) -> DayTime:
+        """The exchange-local time of day of the LONGEST session in the window: the regular close (no literal, INV-13).
+
+        A full day is always the longest session of a window, so anything closing earlier is a half day. The most COMMON
+        close would invert on a window that happens to hold more early closes than regular ones (a two-row December window
+        around the 24th is enough), and would report genuine half days as ordinary sessions.
+        """
+        return max(_local_close(s.close) for s in self._sessions)
 
     # --- helpers -------------------------------------------------------------------------------------------------------
 

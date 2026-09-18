@@ -295,9 +295,7 @@ def _rejection_rate(
     rng = np.random.default_rng(seed)
     rejected = 0
     for d in series:
-        bound = lower_bound(
-            d, alpha=SIZE_ALPHA, block=block, reps=SIZE_REPS, rng=rng, interval=interval, null_critical=null_critical
-        )
+        bound = lower_bound(d, alpha=SIZE_ALPHA, block=block, reps=SIZE_REPS, rng=rng, interval=interval, null_critical=null_critical)
         rejected += int(bound > 0.0)
     return rejected / len(series)
 
@@ -356,9 +354,7 @@ def test_the_size_check_chooses_the_first_interval_candidate_that_holds_its_size
 
     # a method that never rejects would also "hold its size": the chosen one must still see a real effect
     shifted = _null_experiments(777, n_sims=200, n=SIZE_N, shift=0.35)
-    power = _rejection_rate(
-        shifted, chosen, block=SIZE_BLOCK, seed=19, null_critical=critical if chosen == "null_calibrated" else None
-    )
+    power = _rejection_rate(shifted, chosen, block=SIZE_BLOCK, seed=19, null_critical=critical if chosen == "null_calibrated" else None)
     assert power > 0.5, f"chosen {chosen} has no power: {power}"
 
 
@@ -546,9 +542,7 @@ def test_a_degenerate_statistic_is_counted_and_refused_by_default() -> None:
     with pytest.raises(EvalError, match="undefined on"):
         bootstrap_ci(x, undefined_without_a_one, block=20.0, reps=300, level=0.95, rng=np.random.default_rng(69))
 
-    interval = bootstrap_ci(
-        x, undefined_without_a_one, block=20.0, reps=300, level=0.95, rng=rng, max_degenerate_frac=0.9
-    )
+    interval = bootstrap_ci(x, undefined_without_a_one, block=20.0, reps=300, level=0.95, rng=rng, max_degenerate_frac=0.9)
     assert isinstance(interval, Interval)
     assert interval.reps == 300
     assert 0 < interval.n_degenerate < 300

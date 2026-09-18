@@ -299,9 +299,7 @@ def bootstrap_ci(
     _check_degenerate(n_degenerate, reps, max_degenerate_frac, "studentised bootstrap")
     t = np.asarray(tstats, dtype=np.float64)
     if one_sided:
-        return Interval(
-            point, point - float(np.quantile(t, 1.0 - alpha)) * se, float("inf"), reps=reps, n_degenerate=n_degenerate
-        )
+        return Interval(point, point - float(np.quantile(t, 1.0 - alpha)) * se, float("inf"), reps=reps, n_degenerate=n_degenerate)
     return Interval(
         point,
         point - float(np.quantile(t, 1.0 - alpha / 2.0)) * se,

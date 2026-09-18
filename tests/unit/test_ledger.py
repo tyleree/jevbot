@@ -371,7 +371,7 @@ def test_the_high_water_mark_is_the_one_rewritable_meta_key(ledger: SqliteLedger
     ledger.verify(from_seq=3)  # ... and the store picks up exactly where the consumer left it
     assert ledger.last_verified_seq == 7
     for bogus in ("8", "99", "-1", "3.0", " 3", "3_0", "three", ""):
-        with pytest.raises(InvariantError, match=LAST_VERIFIED_SEQ if bogus else "non-empty"):
+        with pytest.raises(InvariantError, match=LAST_VERIFIED_SEQ):
             ledger.set_meta(LAST_VERIFIED_SEQ, bogus)  # never past the head, never anything but plain digits
     assert ledger.get_meta(LAST_VERIFIED_SEQ) == "7"
 
@@ -500,10 +500,19 @@ def test_closing_drops_an_uncommitted_session_and_reopening_continues_the_chain(
         reopened.verify()
 
 
-def test_the_store_creates_its_run_directory_and_refuses_a_foreign_path(tmp_path: Path) -> None:
-    nested = tmp_path / "a" / "b" / "run.sqlite"
+def test_the_store_creates_every_missing_run_directory_with_mode_700(tmp_path: Path) -> None:
+    """13.1 / D1: the data tree is created mode 700 - EVERY level of it, not just the leaf (`pathlib` would give the
+    intermediate parents the default mode). A directory that already existed is never touched."""
+    outer_mode = stat.S_IMODE(tmp_path.stat().st_mode)
+    nested = tmp_path / "runs" / "2024" / "run-1" / "run.sqlite"
     with SqliteLedger(nested) as store:
         assert store.path == nested and nested.exists()
+    for directory in (tmp_path / "runs", tmp_path / "runs" / "2024", tmp_path / "runs" / "2024" / "run-1"):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700, directory
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == outer_mode
+    with SqliteLedger(nested) as reopened:  # reopening an existing tree changes nothing
+        assert reopened.head() == (0, GENESIS_HASH)
+    assert stat.S_IMODE((tmp_path / "runs").stat().st_mode) == 0o700
     with pytest.raises(TypeError):
         SqliteLedger(42)  # type: ignore[arg-type]
 

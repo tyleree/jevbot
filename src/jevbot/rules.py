@@ -111,6 +111,20 @@ _READ_IDS: Final[frozenset[str]] = frozenset(
 if not _READ_IDS <= vocab.RULES_READABLE_IDS:  # INV-23, checked at import
     raise InvariantError(f"rules.py reads question ids outside the trading vocabulary: {sorted(_READ_IDS - vocab.RULES_READABLE_IDS)}")
 
+
+def _require_codes(name: str, codes: frozenset[str], domain: Sequence[str]) -> frozenset[str]:
+    """Every bucket code this module compares a fact against must exist in its `vocab` enumeration, checked at import.
+
+    The cross-checks (7.3) and the code default (7.7) branch on the state's own bucket codes. A WP00 rename in
+    `vocab.SHORT_DIST` / `MOVE_SINCE_ENTRY` / `TREND_DIR` / `IV_RV` / `PCTL5` would otherwise turn a literal here into a
+    comparison that is simply never true - the decider-down default would stop closing a breached short, which fails
+    OPEN - and nothing would say so. Same shape as the `_READ_IDS` check above (INV-23).
+    """
+    missing = codes - frozenset(domain)
+    if missing:
+        raise InvariantError(f"rules.py compares against {sorted(missing)}, which are not vocab.{name} codes")
+    return codes
+
 # --- labels (vocab.CHOICE_LABELS) --------------------------------------------------------------------------------------------
 _REGIME_NO_MATCH: Final = vocab.NO_MATCH_LABEL[_Q_REGIME]  # unclear_or_transition
 _DIRECTION_NO_MATCH: Final = vocab.NO_MATCH_LABEL[_Q_DIRECTION]  # conflicting_signals
@@ -519,12 +533,22 @@ class DecisionRules:
             tone = 0.0
             if text is not None and text_live and _noul(text, _Q_TEXT_MATERIAL).p >= 0.5:
                 tone = _noul(text, _Q_TEXT_POSITIVE).p - _noul(text, _Q_TEXT_NEGATIVE).p
+            # 7.5 prints `0.5 + 0.5*tone` (bullish) | `0.5 - 0.5*tone` (bearish) | `1 - abs(tone)` (neutral_range) and then
+            # annotates the whole line "; = 0.5 when tone == 0". The printed neutral branch is 1.0 at tone 0, which
+            # contradicts that annotation, and the annotation is the binding half: `tone` is 0 BY CONSTRUCTION on every
+            # news-off run (no `text` result exists at all), so `1 - abs(tone)` would hand every iron condor a permanent
+            # +0.5 news_align - a +0.025 S_rank bonus - and let a strictly lower-`S_core` condor take the daily slot from a
+            # vertical when `risk.max_new_per_day` binds. INV-16 lets text RE-RANK; it does not let the ABSENCE of text
+            # reorder underlyings. So all three branches are `0.5 + 0.5 * alignment`, alignment in [-1, 1] (bullish
+            # `tone`, bearish `-tone`, neutral `-abs(tone)`: directional news can only fail to contradict a range thesis,
+            # never confirm it), and with news off S_rank is a monotone transform of S_core. Contract request to WP00:
+            # correct the 7.5 neutral branch to `0.5 - 0.5*abs(tone)`.
             if d_k is Direction.BULLISH:
                 news_align = 0.5 + 0.5 * tone
             elif d_k is Direction.BEARISH:
                 news_align = 0.5 - 0.5 * tone
             else:
-                news_align = 1.0 - abs(tone)
+                news_align = 0.5 - 0.5 * abs(tone)
             ev.news_align_ppm = _ppm(news_align)
             ev.features_ppm["news_align"] = ev.news_align_ppm
             if ev.score_core_ppm < _threshold_ppm(cfg.min_score):
@@ -579,7 +603,11 @@ class DecisionRules:
                 watch_text=pos.watch_text,
                 reasons=(),
             )
-        # 2. decider down / not asked => the code default (D19): close only on a breached or at-strike short, else hold
+        # 2. decider down / not asked => the code default (D19): close only on a breached or at-strike short, else hold.
+        # This branch never reaches the text rule of step 4, so it neither advances nor RESETS the alert counter: 7.7's
+        # `watch_text = 0` belongs to step 4, and "the latch and the counter are stored on the Position through the
+        # ledger ... and restarts keep them" - a decider outage must not erase the operator's only signal for a
+        # persistent unconfirmed headline (INV-16), any more than it erases `exit_latch`.
         if core is None:
             close = facts.short_dist_code in _CODE_DEFAULT_CLOSE_CODES
             return ManageDecision(
@@ -590,7 +618,7 @@ class DecisionRules:
                 source=_SOURCE_CODE_DEFAULT,
                 pressure_ppm=None,
                 exit_latch=pos.exit_latch,
-                watch_text=0,
+                watch_text=pos.watch_text,
                 reasons=() if close else (_MANAGE_HOLD,),
             )
         # 3. core exit pressure X (text-free) and the hysteresis latch
