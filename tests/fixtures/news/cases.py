@@ -46,18 +46,26 @@ def load(name: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _at(row: dict[str, Any], as_of: datetime, lag_s: int) -> datetime:
+def _at(row: dict[str, Any], as_of: datetime, lag_s: int, default_age_hours: float) -> datetime:
     if "created_at" in row:
         return datetime.fromisoformat(str(row["created_at"])).astimezone(UTC)
-    return as_of - timedelta(hours=float(row["age_hours"])) - timedelta(seconds=lag_s)
+    age = float(row.get("age_hours", default_age_hours))
+    return as_of - timedelta(hours=age) - timedelta(seconds=lag_s)
 
 
-def as_items(rows: list[dict[str, Any]], *, as_of: datetime, lag_s: int = 60, symbols: tuple[str, ...] = ("SPY",)) -> list[NewsItem]:
-    """Corpus rows as `NewsItem`s. `created_at` is taken from the row, else derived from `age_hours` so that
-    `knowable_at = created_at + lag_s` lands exactly `age_hours` before `as_of` (the 5.1 archive rule)."""
+def as_items(
+    rows: list[dict[str, Any]],
+    *,
+    as_of: datetime,
+    lag_s: int = 60,
+    symbols: tuple[str, ...] = ("SPY",),
+    default_age_hours: float = 2.0,
+) -> list[NewsItem]:
+    """Corpus rows as `NewsItem`s. `created_at` is taken from the row, else derived from `age_hours` (or
+    `default_age_hours`) so that `knowable_at = created_at + lag_s` lands exactly that far before `as_of` (5.1)."""
     items: list[NewsItem] = []
-    for row in rows:
-        created = _at(row, as_of, lag_s)
+    for index, row in enumerate(rows):
+        created = _at(row, as_of, lag_s, default_age_hours + index * 0.01)
         items.append(
             NewsItem(
                 id=str(row["id"]),

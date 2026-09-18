@@ -115,25 +115,24 @@ def grep(pattern: str, paths: list[Path]) -> list[str]:
     return hits
 
 
+BLANKED_TOKENS = (tokenize.STRING, tokenize.COMMENT, tokenize.FSTRING_START, tokenize.FSTRING_MIDDLE)
+
+
 def code_only(source: str) -> str:
-    """The source with every string literal and comment blanked out, so a grep sees CODE only."""
-    out: list[str] = []
-    line, column = 1, 0
+    """The source with every string literal and comment blanked to spaces, line for line, so a grep sees CODE only."""
+    rows = [list(line) for line in source.splitlines(keepends=True)]
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
-        if token.type == tokenize.ENDMARKER:
-            break  # the end marker sits on a line of its own and would add one to the file
-        start_line, start_col = token.start
-        end_line, end_col = token.end
-        while line < start_line:
-            out.append("\n")
-            line, column = line + 1, 0
-        out.append(" " * max(0, start_col - column))
-        text = token.string
-        if token.type in (tokenize.STRING, tokenize.COMMENT, tokenize.FSTRING_START, tokenize.FSTRING_MIDDLE):
-            text = "".join("\n" if ch == "\n" else " " for ch in text)
-        out.append(text)
-        line, column = end_line, end_col
-    return "".join(out)
+        if token.type not in BLANKED_TOKENS:
+            continue
+        (first_line, first_col), (last_line, last_col) = token.start, token.end
+        for number in range(first_line, last_line + 1):
+            row = rows[number - 1]
+            start = first_col if number == first_line else 0
+            end = last_col if number == last_line else len(row)
+            for i in range(start, min(end, len(row))):
+                if row[i] != "\n":
+                    row[i] = " "
+    return "".join("".join(row) for row in rows)
 
 
 def docstring_ids(tree: ast.AST) -> set[int]:
@@ -332,6 +331,10 @@ def test_the_legacy_credential_names_appear_only_in_the_refusal_list() -> None:
             problems += legacy_name_problems(path, source)
 
     assert problems == [], "INV-02: the legacy names may only be named in order to be refused:\n" + "\n".join(problems)
+    # and the carve-out is not vacuous: config.py IS scanned, and it really does spell the names out
+    assert CONFIG_MODULE in scanned_files(SRC)
+    config_source = CONFIG_MODULE.read_text(encoding="utf-8")
+    assert all(name in config_source for name in LEGACY_ENV_NAMES)
 
 
 def test_the_refusal_list_really_covers_the_names_this_guard_greps_for() -> None:

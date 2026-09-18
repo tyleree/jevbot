@@ -231,10 +231,10 @@ def test_the_parity_spot_ignores_dividends_outside_the_window_or_not_yet_knowabl
 
 
 def test_the_front_expiry_needs_two_days_and_a_forward(cal: XnysCalendar) -> None:
-    chain = make_chain()
+    chain = make_chain(session=date(2024, 5, 20))  # a Monday, so the next session is one calendar day away
     forwards = surface.parity_forwards(raw_table(chain), chain.rate, chain.ts, cal)
-    # an expiry whose last session is tomorrow is not eligible (dte 1 < 2)
     tomorrow = cal.next_session(chain.key.session)
+    assert (tomorrow - chain.key.session).days == 1  # dte 1 < 2: not eligible as the front expiry
     near = {**forwards, tomorrow: 45_000}
     _spot, _unmodelled, front = surface.parity_spot(near, chain.rate, chain.ts, (), calendar=cal, session=chain.key.session)
     assert front != tomorrow and front == chain.expiries()[0]
@@ -242,6 +242,7 @@ def test_the_front_expiry_needs_two_days_and_a_forward(cal: XnysCalendar) -> Non
         surface.parity_spot({tomorrow: 45_000}, chain.rate, chain.ts, (), calendar=cal, session=chain.key.session)
     with pytest.raises(DataUnavailable):
         surface.parity_spot({}, chain.rate, chain.ts, (), calendar=cal, session=chain.key.session)
+    assert surface.parity_spot({**forwards, tomorrow: 0}, chain.rate, chain.ts, (), calendar=cal)[2] == front  # fwd 0 = no forward
     with pytest.raises(ValueError, match="not an XNYS session"):
         surface.parity_spot(forwards, chain.rate, chain.ts, (), calendar=cal, session=date(2024, 5, 18))
 
@@ -497,20 +498,33 @@ def test_two_expiries_that_share_a_last_session_collapse_to_one_node() -> None:
     assert surface.total_variance_at(doubled, 5.0)[0] == pytest.approx((round(iv * 1e4) / 1e4) ** 2 * tau)
 
 
-def test_a_one_session_horizon_is_not_inflated_by_the_weekend(cal: XnysCalendar) -> None:
-    """V13, the reason the variance clock exists: on a term whose total variance is proportional to SESSIONS, one session
-    is one session whether it spans a weekend or not - while calendar scaling would inflate the Friday by sqrt(3)."""
+def test_a_one_session_horizon_is_not_inflated_by_the_weekend() -> None:
+    """V13 / 5.3, the reason the variance clock exists, on the two fixtures the spec names.
+
+    The horizon is ONE session: Friday close -> Monday close (3 calendar days) against Tuesday close -> Wednesday close
+    (1 calendar day). The Friday's front weekly is 7 calendar days / 5 sessions out, the Tuesday's 3 / 3.
+    """
     per_session = 0.0001
-    friday = flat_term([(7 / 365, 5.0, math.sqrt(per_session * 5.0 / (7 / 365)))])  # next expiry: 7 calendar days, 5 sessions
-    tuesday = flat_term([(3 / 365, 3.0, math.sqrt(per_session * 3.0 / (3 / 365)))])  # 3 calendar days, 3 sessions
-    w_friday, _q = surface.total_variance_at(friday, 1.0)  # Friday close -> Monday close is ONE session
+    # (a) total variance proportional to SESSIONS: the two one-session moves must agree within 2%
+    friday = flat_term([(7 / 365, 5.0, math.sqrt(per_session * 5.0 / (7 / 365)))])
+    tuesday = flat_term([(3 / 365, 3.0, math.sqrt(per_session * 3.0 / (3 / 365)))])
+    w_friday, _q = surface.total_variance_at(friday, 1.0)
     w_tuesday, _q2 = surface.total_variance_at(tuesday, 1.0)
     assert w_friday == pytest.approx(per_session, rel=1e-3) and w_tuesday == pytest.approx(per_session, rel=1e-3)
     assert math.sqrt(w_friday) / math.sqrt(w_tuesday) == pytest.approx(1.0, rel=0.02)
-    # the calendar-time counterpart the spec rejects: 3 calendar days over the weekend against 1 on a weekday
-    calendar_friday = friday[0][0] and per_session * 5.0 * (3 / 7)
-    calendar_tuesday = per_session * 3.0 * (1 / 3)
-    assert math.sqrt(calendar_friday / calendar_tuesday) == pytest.approx(math.sqrt(3.0), rel=0.01)
+
+    # (b) a calendar-FLAT-vol weekly-expiry fixture: the same annualised IV at both front expiries
+    iv = 0.16
+    flat_friday = flat_term([(7 / 365, 5.0, iv)])
+    flat_tuesday = flat_term([(3 / 365, 3.0, iv)])
+    em_friday = math.sqrt(surface.total_variance_at(flat_friday, 1.0)[0])
+    em_tuesday = math.sqrt(surface.total_variance_at(flat_tuesday, 1.0)[0])
+    assert em_friday / em_tuesday == pytest.approx(math.sqrt(1.4), rel=1e-3)
+    assert em_friday / em_tuesday <= 1.20  # the spec's bound for this fixture
+    # the calendar-time rule the spec rejects: allocate by tau instead of by sessions
+    calendar_friday = math.sqrt(iv**2 * (7 / 365) * (3 / 7))  # Friday -> Monday spans 3 calendar days
+    calendar_tuesday = math.sqrt(iv**2 * (3 / 365) * (1 / 3))
+    assert calendar_friday / calendar_tuesday == pytest.approx(math.sqrt(3.0), rel=1e-9)  # the 1.73 the spec calls out
 
 
 def test_const_maturity_iv_interpolates_total_variance_in_calendar_time() -> None:
@@ -525,11 +539,12 @@ def test_const_maturity_iv_interpolates_total_variance_in_calendar_time() -> Non
     # one-sided: the nearest node, flagged extrapolated
     assert surface.const_maturity_iv(term, 90) == (pytest.approx(iv2), "extrapolated")
     assert surface.const_maturity_iv(term, 7) == (pytest.approx(iv1), "extrapolated")
-    # the dte >= 7 filter of 5.3 applies here and ONLY here
-    with_front = flat_term([(2 / 365, 2.0, 0.60), *[(t, s, v) for t, s, v in [(tau1, 15.0, iv1), (tau2, 35.0, iv2)]]])
-    assert surface.const_maturity_iv(with_front, 30)[0] == pytest.approx(value, rel=1e-6)
-    assert surface.const_maturity_iv(with_front, 30, min_dte=1)[0] != pytest.approx(value, rel=1e-6)
-    with pytest.raises(DataUnavailable):
+    # the dte >= 7 filter of 5.3 applies here and ONLY here: a 2-day node is not allowed to anchor iv30
+    short_and_long = flat_term([(2 / 365, 2.0, 0.60), (tau2, 35.0, iv2)])
+    assert surface.const_maturity_iv(short_and_long, 30) == (pytest.approx(iv2), "extrapolated")  # only the 49-day node counts
+    loose_value, loose_quality = surface.const_maturity_iv(short_and_long, 30, min_dte=1)
+    assert loose_quality == "interpolated" and loose_value > iv2  # the 60-vol front week would drag iv30 up
+    with pytest.raises(DataUnavailable, match="dte >= 7"):
         surface.const_maturity_iv(flat_term([(2 / 365, 2.0, 0.6)]), 30)
     with pytest.raises(ValueError, match="days must be >= 1"):
         surface.const_maturity_iv(term, 0)

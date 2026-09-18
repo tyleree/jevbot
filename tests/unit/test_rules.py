@@ -12,6 +12,7 @@ separately so that an out-of-band sum can be simulated without disturbing the pr
 """
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any, Final
@@ -44,8 +45,8 @@ from jevbot.types import (
     Position,
     RequestKind,
     ScoreAns,
-    SnapshotKey,
     Slot,
+    SnapshotKey,
     Structure,
     StructureKind,
     Tri,
@@ -853,7 +854,7 @@ def test_a_missing_or_mistyped_answer_is_an_invariant_error() -> None:
     engine = rules()
     partial = core_answers()
     del partial["vol.stance"]
-    with pytest.raises(InvariantError, match="vol.stance"):
+    with pytest.raises(InvariantError, match=re.escape("vol.stance")):
         decide(engine, partial, facts())
     wrong_type = core_answers(vol__stance=noul(0.5))
     with pytest.raises(InvariantError, match="Choice"):
