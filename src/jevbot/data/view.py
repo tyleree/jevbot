@@ -205,7 +205,7 @@ class DataView:
         table = self._table(daily_table_name(underlying))
         today = pd.Timestamp(self.session)
         slot = self._key.slot.value
-        table.row((self.session, slot), self._as_of)  # PitViolation / DataUnavailable for the snapshot's OWN row
+        table.row((self.session, slot), self._as_of)  # INV-14: PitViolation / DataUnavailable for the snapshot's OWN row
         rows = table.asof(self._as_of)
         own_labels = rows.index[(rows["session"] == today) & (rows["slot"] == slot)]
         if len(own_labels) != 1:

@@ -200,7 +200,7 @@ class PitTable:
         when = pd.Timestamp(_as_utc("as_of", as_of))
         position = self._position(key)
         row_knowable = self._df.at[position, KNOWABLE_AT]
-        if row_knowable > when:
+        if row_knowable > when:  # INV-14
             raise PitViolation(
                 f"table {self.name}: row {self._key_text(key)} is knowable at {row_knowable.isoformat()} > as_of {when.isoformat()}"
             )
@@ -228,7 +228,7 @@ class PitTable:
             gate = self._df.at[position, ts_column]
             if pd.isna(gate):
                 raise DataUnavailable(f"table {self.name}: {column} of row {self._key_text(key)} has not been recorded yet")
-        if gate > when:
+        if gate > when:  # INV-14
             raise PitViolation(
                 f"table {self.name}: {column} of row {self._key_text(key)} is knowable at {gate.isoformat()} > as_of {when.isoformat()}"
             )

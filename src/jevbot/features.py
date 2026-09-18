@@ -120,6 +120,9 @@ class FeatureSet(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_field
     em_5_tenths: int | None = None
     em_hold_tenths: int | None = None
     iv_var_5: float | None = None  # implied TOTAL variance to the 5-session close, for `rv_gt_iv` (6.4)
+    # the snapshot's own ATM term (13.2 `atm_term_json`), parsed once: the expected moves above and the manage state's
+    # position distances (5.5 SHORT_DIST / BREAKEVEN) read the SAME nodes
+    atm_term: tuple[AtmNode, ...] = ()
     # provenance-only facts
     iv_hist_proxy_pct: int = 0  # share of proxy-filled rows in the trailing 252-session IV history (5.4, V10)
 
@@ -154,7 +157,7 @@ class FeatureSet(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_field
 
     def raw(self) -> dict[str, str]:
         """Every feature rendered as a string, for `Provenance.raw_features` (audit only, never sent to Jev)."""
-        return {name: repr(getattr(self, name)) for name in self.__struct_fields__ if name not in ("underlying",)}
+        return {name: repr(getattr(self, name)) for name in self.__struct_fields__ if name not in ("underlying", "atm_term")}
 
 
 # ======================================================================================================================
@@ -469,6 +472,7 @@ def compute_features(view: MarketView, underlying: str, hold_sessions: int, *, d
 
     # --- expected moves, in trading time (V13) ------------------------------------------------------------------------
     term = parse_atm_term(daily["atm_term_json"].iloc[-1] if not daily.empty and "atm_term_json" in daily.columns else None)
+    out["atm_term"] = term
     for horizon, name in ((1, "1"), (5, "5"), (hold_sessions, "hold")):
         tt = _resolve_tt(view, horizon)
         found = None if tt is None else expected_move(term, tt)

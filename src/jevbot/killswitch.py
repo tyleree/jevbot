@@ -153,6 +153,7 @@ class DefaultKillSwitch:
         self._retry_at: datetime | None = None
         self._cooldown_until: date | None = None
         self.run_stopped = False
+        self._attempt_next: dict[str, int] = self._resume_attempts()
         self._state, self._event_id = self._resume()
 
     # ------------------------------------------------------------------------------------------------------------------
@@ -356,9 +357,10 @@ class DefaultKillSwitch:
         if intent is None:
             return False
         self._append_intent(intent, view)
-        for attempt in range(self._cfg.kill.flatten_attempts):
+        for _ in range(self._cfg.kill.flatten_attempts):
             if self._flat(broker, group.legs):
                 return True
+            attempt = self._take_attempt(intent)
             limit = self._limit(view, intent, group.legs, attempt)
             if not self._send(broker, view, intent, attempt, limit):
                 continue
@@ -377,15 +379,16 @@ class DefaultKillSwitch:
             if intent is None:
                 continue
             self._append_intent(intent, view)
-            for attempt in range(self._cfg.kill.flatten_attempts):
+            for _ in range(self._cfg.kill.flatten_attempts):
                 if self._flat(broker, (leg,)):
                     break
+                attempt = self._take_attempt(intent)
                 limit = self._limit(view, intent, (leg,), attempt)
                 if self._send(broker, view, intent, attempt, limit):
                     self._await_fill(broker, view, intent, attempt)
             if not self._flat(broker, (leg,)):
                 # last resort: a market order (limit None), market hours only - K3 / K4 run only while the market is open
-                last = self._cfg.kill.flatten_attempts
+                last = self._take_attempt(intent)
                 if self._send(broker, view, intent, last, None, market=True):
                     self._await_fill(broker, view, intent, last)
 
@@ -418,8 +421,9 @@ class DefaultKillSwitch:
                 equity_qty=abs(shares),
             )
             self._append_intent(intent, view)
-            if self._send(broker, view, intent, 0, None, market=True):
-                self._await_fill(broker, view, intent, 0)
+            attempt = self._take_attempt(intent)
+            if self._send(broker, view, intent, attempt, None, market=True):
+                self._await_fill(broker, view, intent, attempt)
 
     # --- order plumbing ------------------------------------------------------------------------------------------------
 
@@ -510,6 +514,23 @@ class DefaultKillSwitch:
             cfg=self._cfg,
             mode=self._meta.mode,
         )
+
+    def _take_attempt(self, intent: OrderIntent) -> int:
+        """The next unused attempt number of this intent (INV-09: a resubmission is always `attempt + 1`, never the same id).
+
+        The counter survives a restart because it is rebuilt from the ledger's ORDER_STATUS entries (`_resume_attempts`).
+        """
+        attempt = self._attempt_next.get(intent.intent_id, 0)
+        self._attempt_next[intent.intent_id] = attempt + 1
+        return attempt
+
+    def _resume_attempts(self) -> dict[str, int]:
+        highest: dict[str, int] = {}
+        for entry in self._ledger.entries(LedgerKind.ORDER_STATUS):
+            intent_id = str(entry.payload.get("intent_id", ""))
+            attempt = int(entry.payload.get("attempt", 0))
+            highest[intent_id] = max(highest.get(intent_id, -1), attempt)
+        return {intent_id: attempt + 1 for intent_id, attempt in highest.items()}
 
     # --- pricing -------------------------------------------------------------------------------------------------------
 

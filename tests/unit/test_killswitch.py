@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -156,7 +156,7 @@ def spread(short_milli: int, long_milli: int) -> Structure:
 
 SPREADS = tuple(spread(436_000 - 2_000 * i, 431_000 - 2_000 * i) for i in range(6))
 CONDOR = make_structure(CHAIN, StructureKind.IRON_CONDOR)
-ALL_LEGS = tuple({leg.contract.occ for s in (*SPREADS, CONDOR) for leg in s.legs})
+ALL_LEGS = tuple(str(occ) for occ in CHAIN.table["occ"])  # the broker quotes the whole chain, as a real one does
 
 
 @dataclass
@@ -259,9 +259,7 @@ def hold(w: World, structure: Structure, *, index: int, qty: int = 1) -> None:
         key=KEY,
         ts=CLOSE,
         net=BandPrices(orats=-200, worst=-200, mid=-205),
-        legs=tuple(
-            LegFill(occ=leg.contract.occ, side=leg.side, bid=100, ask=104, orats=102, worst=102, mid=102) for leg in intent.legs
-        ),
+        legs=tuple(LegFill(occ=leg.contract.occ, side=leg.side, bid=100, ask=104, orats=102, worst=102, mid=102) for leg in intent.legs),
         fees_micro=0,
         forced=False,
         model_reject=(),
@@ -400,7 +398,7 @@ def test_structures_with_short_legs_go_first_and_nearest_expiry_first(tmp_path: 
     short_first = ids.position_id(NAMESPACE, SESSION, SPREADS[0].structure_id)
     long_only = ids.position_id(NAMESPACE, SESSION, near.structure_id)
     assert order_of[short_first] < order_of[long_only]
-    assert len(submitted) == 2
+    assert len(submitted) == 2  # one order per structure, filled on the first rung
 
 
 def test_an_unmatched_broker_leg_forms_its_own_single_leg_group(tmp_path: Path) -> None:
@@ -444,8 +442,9 @@ def test_kill_orders_are_exempt_from_the_rate_and_attempt_caps(tmp_path: Path) -
     w.kill.trip(KillTrigger.DRAWDOWN, "cap")
     assert w.kill.step(w.broker, w.view, market_open=True) is KillState.LOCKED
     assert w.broker.positions() == ()
-    submissions = w.book.state().orders_last_minute
+    submissions = sum(1 for e in w.ledger.entries(LedgerKind.ORDER_STATUS) if e.payload["status"] == "submitting")
     assert submissions > CFG.risk.max_orders_per_minute, submissions
+    assert w.book.state().orders_last_minute == submissions  # every one of them inside the trailing 60 s
     verdicts = [entry.payload for entry in w.ledger.entries(LedgerKind.RISK_VERDICT)]
     assert verdicts and all(v["approved"] for v in verdicts)
 
@@ -616,7 +615,9 @@ def test_without_reset_peak_a_drawdown_kill_re_trips_at_once(tmp_path: Path) -> 
                 "open_max_loss": 0,
                 "bp_used": 0,
                 "bp_utilisation_ppm": 0,
-                "positions": {ids.position_id(NAMESPACE, SESSION, SPREADS[0].structure_id): {"liq_value": 9_000, "mid_value": 9_000, "stale": False}},
+                "positions": {
+                    ids.position_id(NAMESPACE, SESSION, SPREADS[0].structure_id): {"liq_value": 9_000, "mid_value": 9_000, "stale": False}
+                },
                 "net_delta_milli": 0,
                 "net_vega_milli": 0,
             },
@@ -629,8 +630,9 @@ def test_without_reset_peak_a_drawdown_kill_re_trips_at_once(tmp_path: Path) -> 
     assert event is not None
 
     w.kill.rearm(event, reset_peak=False, note="no reset")
-    assert w.book.state().peak_equity == peak
-    assert w.risk.on_mark(w.book.state()) and w.risk.on_mark(w.book.state())[0][0] is KillTrigger.DRAWDOWN
+    assert w.book.state().peak_equity == peak  # the peak survives: the next mark at the old equity re-trips at once
+    marked_down = msgspec.structs.replace(w.book.state(), equity=BandPrices(orats=peak * 90 // 100, worst=0, mid=0))
+    assert w.risk.on_mark(marked_down)[0][0] is KillTrigger.DRAWDOWN
 
     w.kill.trip(KillTrigger.DRAWDOWN, "again")
     again = w.kill.event_id()
@@ -660,7 +662,9 @@ def test_a_backtest_re_arms_itself_after_the_cooldown_with_the_peak_reset(tmp_pa
     )
     assert w.kill.step(w.broker, early, market_open=True) is KillState.LOCKED
 
-    late = FakeView(key=SnapshotKey(session=cooldown_end, slot=Slot.EOD), as_of=CAL.open_close(cooldown_end)[1], calendar=CAL, chains=(CHAIN,))
+    late = FakeView(
+        key=SnapshotKey(session=cooldown_end, slot=Slot.EOD), as_of=CAL.open_close(cooldown_end)[1], calendar=CAL, chains=(CHAIN,)
+    )
     assert w.kill.step(w.broker, late, market_open=True) is KillState.ARMED
     assert w.broker.suspended is False
     payload = next(w.ledger.entries(LedgerKind.REARM)).payload
@@ -694,6 +698,11 @@ def test_an_armed_switch_does_nothing_and_a_missing_broker_is_an_invariant_error
     w = world(tmp_path)
     assert w.kill.step(w.broker, w.view, market_open=True) is KillState.ARMED
     assert list(w.ledger.entries(LedgerKind.KILL)) == []
+
+    hold(w, SPREADS[0], index=0)
+    w.kill.trip(KillTrigger.OPERATOR, "no broker")
+    event = w.kill.event_id()
+    assert event is not None
     lonely = DefaultKillSwitch(
         cfg=CFG,
         meta=meta(),
@@ -706,8 +715,9 @@ def test_an_armed_switch_does_nothing_and_a_missing_broker_is_an_invariant_error
         state_dir=w.state_dir,
         sleep=lambda _s: None,
     )
+    assert lonely.state() is KillState.TRIPPED
     with pytest.raises(InvariantError, match="no broker"):
-        lonely.rearm("x", reset_peak=False, note="n")
+        lonely.rearm(event, reset_peak=False, note="n")
 
 
 def test_rearm_is_refused_while_the_switch_is_armed(tmp_path: Path) -> None:

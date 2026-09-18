@@ -43,7 +43,7 @@ from jevbot.cal import trading_time
 from jevbot.canon import dumps_ordered, ensure_state_safe, sha256_hex
 from jevbot.config import Config, headline_band
 from jevbot.errors import DataUnavailable, InvariantError
-from jevbot.features import FeatureSet, compute_features, parse_atm_term, total_variance_at
+from jevbot.features import FeatureSet, compute_features, total_variance_at
 from jevbot.protocols import Calendar, MarketView
 from jevbot.types import (
     SHORT_PREMIUM,
@@ -285,7 +285,7 @@ class StateBuilder:
         trend = buckets.trend_direction(features.ref, features.ma20, features.ma50, features.ma20_prev)
         iv_rank_label = buckets.bucketize(features.iv_rank, buckets.PCTL5_RANGE)
         iv_rv_label = buckets.bucketize(features.iv_rv, buckets.IV_RV)
-        sigma = _expiry_sigma(view, underlying, pos.structure)
+        sigma = _expiry_sigma(view, features, pos.structure)
         held = view.calendar.sessions_between(pos.open_key.session, view.session)
         dte = (pos.structure.last_session - view.session).days
         pnl_label = _pnl_label(pos)
@@ -635,17 +635,15 @@ def _time_exit_horizon(calendar: Calendar, session: date, structure: Structure, 
     return max(0, calendar.sessions_between(session, exit_session))
 
 
-def _expiry_sigma(view: MarketView, underlying: str, structure: Structure) -> float | None:
-    """`sqrt(total variance to the structure's last trading day)` - the "expected move" both position distances use (5.5)."""
-    try:
-        daily = view.daily(underlying, 2)
-    except DataUnavailable:
-        return None
-    if daily.empty or "atm_term_json" not in daily.columns:
-        return None
-    term = parse_atm_term(daily["atm_term_json"].iloc[-1])
+def _expiry_sigma(view: MarketView, features: FeatureSet, structure: Structure) -> float | None:
+    """`sqrt(total variance to the structure's last trading day)` - the "expected move" both position distances use (5.5).
+
+    The nodes are the snapshot's own ATM term, the same ones the expected moves of 5.3 are allocated over, and the
+    horizon is measured in TRADING time (V13): where the expiry IS a node, this is exactly the market's total variance
+    to that close.
+    """
     close = view.calendar.open_close(structure.last_session)[1]
-    found = total_variance_at(term, trading_time(view.calendar, view.as_of, close))
+    found = total_variance_at(features.atm_term, trading_time(view.calendar, view.as_of, close))
     if found is None or found[0] <= 0.0:
         return None
     return math.sqrt(found[0])

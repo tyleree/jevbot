@@ -118,7 +118,7 @@ def _blocks(table: pd.DataFrame) -> Iterator[tuple[date, pd.DataFrame]]:
 def _expiry_times(expiry: date, ts: datetime, calendar: "Calendar") -> tuple[date, float, float] | None:
     """`(last_session, T_E, tt_E)` of an expiry - the ONE place `close(last_session(E))` is spelt. `None` once the expiry's
     last session has closed (`T_E <= 0`)."""
-    last = calendar.prev_or_same_session(expiry)
+    last = calendar.prev_or_same_session(expiry)  # INV-11: the contract's last trading day, never the listed expiry
     close = calendar.open_close(last)[1]
     tau = year_fraction(ts, close)
     if tau <= 0.0:
@@ -294,9 +294,9 @@ def enrich(
         call_all = out["right"].astype(str).to_numpy() == "C"
         for expiry in _expiry_dates(out):
             rows = expiry_all == np.datetime64(expiry, "ns")
-            last = calendar.prev_or_same_session(expiry)
+            last = calendar.prev_or_same_session(expiry)  # INV-11
             last_session[rows] = np.datetime64(last, "ns")
-            dte[rows] = (last - today).days
+            dte[rows] = (last - today).days  # calendar days to the LAST TRADING DAY (Conventions)
             forward = forwards.get(expiry, 0)
             tau = year_fraction(ts, calendar.open_close(last)[1])
             if forward <= 0 or tau <= 0.0:
