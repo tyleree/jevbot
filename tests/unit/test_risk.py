@@ -397,9 +397,7 @@ def test_check_1_and_2_an_entry_halt_and_a_diagnostic_run_stop_an_open_but_not_a
     diagnostic = engine(flags=("diagnostic",))
     pf = portfolio(positions=(position_of(NARROW),))
     for purpose, limits in ((OrderPurpose.OPEN, (-250, -246)), (OrderPurpose.CLOSE, (250, 246))):
-        verdict, order = approve(
-            intent_of(NARROW, purpose=purpose, limit_start=limits[0], limit_natural=limits[1]), pf=pf, eng=diagnostic
-        )
+        verdict, order = approve(intent_of(NARROW, purpose=purpose, limit_start=limits[0], limit_natural=limits[1]), pf=pf, eng=diagnostic)
         assert order is None and "risk:diagnostic_run" in verdict.reject_codes
         assert check(verdict, "diagnostic_run").detail == "diagnostic"
 
@@ -424,9 +422,7 @@ def test_check_3_refuses_an_underlying_outside_the_whitelist_and_a_leg_of_anothe
 
 
 def test_check_4_refuses_a_disabled_kind_and_legs_that_are_not_the_kinds_template() -> None:
-    cfg = msgspec.structs.replace(
-        Config(), structures=msgspec.structs.replace(Config().structures, enabled=(StructureKind.LONG_CALL,))
-    )
+    cfg = msgspec.structs.replace(Config(), structures=msgspec.structs.replace(Config().structures, enabled=(StructureKind.LONG_CALL,)))
     verdict, order = approve(intent_of(NARROW), cfg=cfg)
     assert order is None and not check(verdict, "structure_not_allowed").passed
 
@@ -435,9 +431,7 @@ def test_check_4_refuses_a_disabled_kind_and_legs_that_are_not_the_kinds_templat
     assert not check(verdict, "structure_not_allowed").passed
 
     second_expiry = contract_at(CHAIN, CHAIN.expiries()[0], Right.PUT, 431_000)
-    calendarised = msgspec.structs.replace(
-        NARROW, legs=(Leg(contract=second_expiry, side=Side.BUY), NARROW.legs[1])
-    )
+    calendarised = msgspec.structs.replace(NARROW, legs=(Leg(contract=second_expiry, side=Side.BUY), NARROW.legs[1]))
     verdict, _ = approve(intent_of(calendarised))
     assert not check(verdict, "structure_not_allowed").passed  # a single expiry is part of the template
 
@@ -661,9 +655,7 @@ def test_check_8_blocks_an_open_on_clock_skew_but_never_a_close() -> None:
     verdict, order = approve(intent_of(NARROW), clock=reading)
     assert order is None and "risk:clock_skew" in verdict.reject_codes
     pf = portfolio(positions=(position_of(NARROW),))
-    verdict, order = approve(
-        intent_of(NARROW, purpose=OrderPurpose.CLOSE, limit_start=250, limit_natural=246), pf=pf, clock=reading
-    )
+    verdict, order = approve(intent_of(NARROW, purpose=OrderPurpose.CLOSE, limit_start=250, limit_natural=246), pf=pf, clock=reading)
     assert order is not None and check(verdict, "clock_skew").detail.startswith("n/a")
     ok = msgspec.structs.replace(reading, skew_ms=5_000)
     _, order = approve(intent_of(NARROW), clock=ok)
@@ -741,9 +733,7 @@ def test_check_11_blocks_a_short_premium_entry_inside_the_fomc_blackout_only() -
     assert order is not None and check(clear, "event_blackout").passed
 
     debit = make_structure(CHAIN, StructureKind.CALL_DEBIT)  # long premium: no blackout
-    verdict, _ = approve(
-        intent_of(debit, limit_start=581, limit_natural=581), view=view_of(CHAIN, events=(fomc_event(inside),))
-    )
+    verdict, _ = approve(intent_of(debit, limit_start=581, limit_natural=581), view=view_of(CHAIN, events=(fomc_event(inside),)))
     assert check(verdict, "event_blackout").detail == "not short premium"
 
 
@@ -1340,9 +1330,7 @@ def test_the_cycle_gate_reports_the_book_halt_and_the_kill_state() -> None:
 
 def test_the_headline_band_follows_the_fill_rule() -> None:
     assert headline_band(Config()) is Band.ORATS
-    worst = msgspec.structs.replace(
-        Config(), cadence=msgspec.structs.replace(Config().cadence, fill_rule=FillRule.SAME_SNAPSHOT_WORST)
-    )
+    worst = msgspec.structs.replace(Config(), cadence=msgspec.structs.replace(Config().cadence, fill_rule=FillRule.SAME_SNAPSHOT_WORST))
     assert headline_band(worst) is Band.WORST
     assert DefaultRiskEngine(worst).headline is Band.WORST
 
@@ -1352,7 +1340,9 @@ def test_the_lowest_tier_comes_from_the_configured_tier_tables() -> None:
         Config(),
         rules=msgspec.structs.replace(
             Config().rules,
-            tiers=msgspec.structs.replace(Config().rules.tiers, score=((0.8, 1.0),), peakedness=((0.8, 1.0),), environment=(1.0, 1.0, 1.0, 0.0)),
+            tiers=msgspec.structs.replace(
+                Config().rules.tiers, score=((0.8, 1.0),), peakedness=((0.8, 1.0),), environment=(1.0, 1.0, 1.0, 0.0)
+            ),
         ),
     )
     eng = DefaultRiskEngine(cfg)

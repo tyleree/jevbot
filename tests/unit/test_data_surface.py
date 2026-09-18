@@ -8,7 +8,7 @@ spec text - never by re-running the function under test.
 
 import math
 import time
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -19,7 +19,7 @@ from jevbot.config import DataConfig
 from jevbot.data import surface
 from jevbot.data.surface import SurfaceNode, TermNode
 from jevbot.errors import DataError, DataUnavailable
-from jevbot.types import CHAIN_COLUMNS, ChainSnapshot, ScheduledEvent
+from jevbot.types import CHAIN_COLUMNS, ChainSnapshot, OptionContract, Right, ScheduledEvent
 from tests.fixtures.chain_factory import (
     GOOD_FRIDAY_SESSION,
     SATURDAY_MONTHLY_SESSION,
@@ -64,10 +64,10 @@ def exdiv(underlying: str, ex_date: date, amount: int, *, knowable: datetime | N
         underlying=underlying,
         amount_cents=amount,
         scheduled=True,
-        knowable_at=knowable if knowable is not None else datetime(2000, 1, 1, tzinfo=XnysCalendar().open_close(ex_date)[1].tzinfo),
+        knowable_at=knowable if knowable is not None else datetime(2000, 1, 1, tzinfo=UTC),
         knowable_rule="exdiv_minus_14d_assumption",
         source_url="alpaca:corporate-actions",
-        fetched_at=datetime(2026, 1, 1, tzinfo=XnysCalendar().open_close(ex_date)[1].tzinfo),
+        fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
 
@@ -96,7 +96,9 @@ def test_one_strike_of_put_call_parity_written_out_by_hand(cal: XnysCalendar) ->
     call = block[(block["strike_milli"] == strike_milli) & (block["right"] == "C")].iloc[0]
     put = block[(block["strike_milli"] == strike_milli) & (block["right"] == "P")].iloc[0]
     tau = tau_of(chain, expiry, cal)
-    by_hand = strike_milli / 10 + math.exp(chain.rate * tau) * ((int(call["bid"]) + int(call["ask"])) - (int(put["bid"]) + int(put["ask"]))) / 2
+    by_hand = (
+        strike_milli / 10 + math.exp(chain.rate * tau) * ((int(call["bid"]) + int(call["ask"])) - (int(put["bid"]) + int(put["ask"]))) / 2
+    )
     assert abs(by_hand - forward) <= 1.0
     assert abs(surface.parity_forwards(table, chain.rate, chain.ts, cal)[expiry] - by_hand) <= 1.0
 
@@ -190,9 +192,7 @@ def test_the_parity_spot_adds_the_present_value_of_a_verified_dividend(cal: Xnys
     assert chain.key.session < ex_date <= last
     dividend = exdiv("SPY", ex_date, 150)
 
-    with_div = surface.parity_spot(
-        forwards, chain.rate, chain.ts, [dividend], calendar=cal, session=chain.key.session, covered=True
-    )
+    with_div = surface.parity_spot(forwards, chain.rate, chain.ts, [dividend], calendar=cal, session=chain.key.session, covered=True)
     tau = year_fraction(chain.ts, cal.open_close(last)[1])
     t_j = year_fraction(chain.ts, cal.open_close(ex_date)[1])
     by_hand = forwards[front] * math.exp(-chain.rate * tau) + 150 * math.exp(-chain.rate * t_j)
@@ -273,9 +273,7 @@ def test_enrichment_solves_own_iv_only_from_two_sided_quotes_inside_the_band(cal
     with it."""
     chain = make_chain()
     expiry = chain.expiries()[3]
-    strike = int(chain.side(expiry, chain.table["right"].iloc[0] and __import__("jevbot.types", fromlist=["Right"]).Right.CALL).iloc[5]["strike_milli"])
-    from jevbot.types import OptionContract, Right
-
+    strike = int(chain.side(expiry, Right.CALL).iloc[5]["strike_milli"])
     contract = OptionContract(underlying="SPY", expiry=expiry, right=Right.CALL, strike_milli=strike)
     zero_bid = set_quote(chain, contract, bid=0)
     forwards = surface.parity_forwards(raw_table(zero_bid), zero_bid.rate, zero_bid.ts, cal)
@@ -293,8 +291,7 @@ def test_enrichment_is_vectorised_and_inside_the_speed_budget(cal: XnysCalendar)
     """DESIGN 1.1: own IV is solved ONCE, vectorised, in `data derive`; no per-row Python solver runs in a backtest."""
     chain = make_chain()
     table = raw_table(chain)
-    big = pd.concat([table] * 6, ignore_index=True)
-    big["strike_milli"] = big["strike_milli"] + (big.index // len(table)).to_numpy() * 0  # same strikes, 6x the rows
+    big = pd.concat([table] * 6, ignore_index=True)  # the same expiries, six times the strikes a real chain carries
     forwards = surface.parity_forwards(table, chain.rate, chain.ts, cal)
     assert len(big) >= 10_000
     started = time.perf_counter()
@@ -386,8 +383,6 @@ def test_fit_smiles_covers_every_expiry_that_admits_a_fit(cal: XnysCalendar) -> 
 
 
 def test_the_two_strike_atm_iv_is_the_hand_interpolation_between_the_bracketing_strikes(cal: XnysCalendar) -> None:
-    from jevbot.types import Right
-
     chain = make_chain()
     expiry = chain.expiries()[3]
     forward = chain.forward(expiry)
@@ -423,8 +418,6 @@ def test_the_atm_iv_is_the_fit_at_k_zero_with_the_two_strike_value_stored_beside
 def test_a_distorted_pair_of_atm_quotes_diverges_from_the_fit(cal: XnysCalendar) -> None:
     """5.3: the two-strike level rests on two mid quotes and is fragile - which is why it is only the QC twin. A 30% shift
     of the two strikes around the forward must move it past `data.atm_iv_tolerance` while the fit barely moves."""
-    from jevbot.types import OptionContract, Right
-
     chain = make_chain()
     expiry = chain.expiries()[5]
     forward = chain.forward(expiry)
@@ -637,11 +630,22 @@ def test_the_plain_fallback_uses_the_shared_node_set(cal: XnysCalendar) -> None:
     assert smile is not None and abs(smile[0] - got[0]) > 1e-3  # the two methods really differ under skew
 
 
+def digital_by_hand(*, forward: float, strike: int, tau: float, w: float, dw_dk: float) -> float:
+    """`sigma = sqrt(w / tau)`, `dsigma/dK = (dw/dk) / (2 sigma tau K)`, `PA = N(d2) - F sqrt(tau) n(d1) dsigma/dK`
+    (6.4 step 3), written out from the spec with `math.erfc` - no call into `bs.py` or `surface.py`."""
+    sigma = math.sqrt(w / tau)
+    total_vol = sigma * math.sqrt(tau)
+    d1 = math.log(forward / strike) / total_vol + 0.5 * total_vol
+    d2 = d1 - total_vol
+    dsigma_dk = dw_dk / (2.0 * sigma * tau * strike)
+    return phi(d2) - forward * math.sqrt(tau) * npdf(d1) * dsigma_dk
+
+
 def test_a_horizon_below_the_first_expiry_uses_the_trading_time_ratio(cal: XnysCalendar) -> None:
-    """6.4 step 2: below the first node, `rho = tt / tt_1`, `k' = k / sqrt(rho)`, `w = rho w_1(k')`. On a flat smile
-    `w_1(k') = w_1`, so the whole rule reduces to `w = rho w_1` - hand-checkable end to end."""
-    chain = make_chain(smile=FLAT)
-    resolve = cal.open_close(cal.next_session(chain.key.session))[1]  # one session ahead; the first expiry is 5 away
+    """6.4 step 2: below the first node, `rho = tt / tt_1`, `k' = k / sqrt(rho)`, `w = rho w_1(k')`,
+    `dw/dk = sqrt(rho) w_1'(k')`. The horizon is Friday close -> Monday close: ONE session, not three calendar days."""
+    chain = make_chain()
+    resolve = cal.open_close(cal.next_session(chain.key.session))[1]
     tau = year_fraction(chain.ts, resolve)
     tt = trading_time(cal, chain.ts, resolve)
     front = chain.expiries()[0]
@@ -649,26 +653,35 @@ def test_a_horizon_below_the_first_expiry_uses_the_trading_time_ratio(cal: XnysC
     assert fit is not None
     rho = tt / fit.tt_sessions
     assert tt == pytest.approx(1.0) and fit.tt_sessions == pytest.approx(5.0) and rho == pytest.approx(0.2)
+    assert tau * 365 == pytest.approx(3.0, abs=0.01)  # three CALENDAR days: the two clocks really do differ here
 
     strike = int(chain.spot * 1.005)
     forward = chain.spot * math.exp(chain.rate * tau)
     k = math.log(strike / forward)
-    w = rho * fit.w(k / math.sqrt(rho))
-    sigma = math.sqrt(w / tau)
-    total_vol = sigma * math.sqrt(tau)
-    d2 = math.log(forward / strike) / total_vol - 0.5 * total_vol
+    root = math.sqrt(rho)
+    by_hand = digital_by_hand(forward=forward, strike=strike, tau=tau, w=rho * fit.w(k / root), dw_dk=root * fit.dw_dk(k / root))
 
     got = surface.implied_prob_above(chain, strike, resolve, cal)
     assert got is not None and got[1:] == ("smile_digital", "extrapolated")
-    assert got[0] == pytest.approx(phi(d2), abs=1e-9)
+    assert got[0] == pytest.approx(by_hand, abs=1e-9)
+    # the calendar-time alternative (rho = tau / tau_1 = 3/7) would price a visibly different probability
+    calendar_rho = tau / fit.tau_years
+    calendar_root = math.sqrt(calendar_rho)
+    calendar = digital_by_hand(
+        forward=forward,
+        strike=strike,
+        tau=tau,
+        w=calendar_rho * fit.w(k / calendar_root),
+        dw_dk=calendar_root * fit.dw_dk(k / calendar_root),
+    )
+    assert calendar_rho == pytest.approx(3 / 7, rel=0.01) and abs(calendar - by_hand) > 0.01
 
 
 def test_the_horizon_between_two_nodes_is_blended_linearly_in_trading_time(cal: XnysCalendar) -> None:
-    chain = make_chain(smile=FLAT)
+    chain = make_chain()
     nodes = surface.chain_nodes(chain, cal)
     lower, upper = nodes[0], nodes[1]
-    # a session strictly between the two expiries' last sessions
-    middle = cal.next_session(lower.last_session, 2)
+    middle = cal.next_session(lower.last_session, 2)  # a session strictly between the two expiries' last sessions
     assert lower.last_session < middle < upper.last_session
     resolve = cal.open_close(middle)[1]
     tau = year_fraction(chain.ts, resolve)
@@ -680,23 +693,27 @@ def test_the_horizon_between_two_nodes_is_blended_linearly_in_trading_time(cal: 
     forward = chain.spot * math.exp(chain.rate * tau)
     k = math.log(strike / forward)
     assert lower.fit is not None and upper.fit is not None
-    w = lower.fit.w(k) + theta * (upper.fit.w(k) - lower.fit.w(k))
-    sigma = math.sqrt(w / tau)
-    total_vol = sigma * math.sqrt(tau)
-    d2 = math.log(forward / strike) / total_vol - 0.5 * total_vol
-
+    by_hand = digital_by_hand(
+        forward=forward,
+        strike=strike,
+        tau=tau,
+        w=lower.fit.w(k) + theta * (upper.fit.w(k) - lower.fit.w(k)),
+        dw_dk=lower.fit.dw_dk(k) + theta * (upper.fit.dw_dk(k) - lower.fit.dw_dk(k)),
+    )
     got = surface.implied_prob_above(chain, strike, resolve, cal)
     assert got is not None and got[1:] == ("smile_digital", "interpolated")
-    assert got[0] == pytest.approx(phi(d2), abs=1e-9)
+    assert got[0] == pytest.approx(by_hand, abs=1e-9)
 
 
 def test_the_expected_move_and_the_digital_share_one_node_set(cal: XnysCalendar) -> None:
     """The acceptance sentence of 6.4: the threshold (`em`, from `total_variance_at`) and its reference (`PA`) are built
     from the SAME nodes and the SAME trading-time rule - every expiry with dte >= 1, no dte >= 7 filter."""
-    chain = make_chain()
+    chain = make_chain(session=date(2024, 5, 21))  # a Tuesday: the front weekly is 3 DTE, below any dte >= 7 filter
     nodes = surface.chain_nodes(chain, cal)
     term = surface.term_of(nodes)
-    assert [n.dte for n in nodes] == sorted(n.dte for n in nodes) and min(n.dte for n in nodes) < 7  # the front week is IN
+    assert [n.dte for n in nodes] == sorted(n.dte for n in nodes) and min(n.dte for n in nodes) == 3  # the front week is IN
+    assert surface.const_maturity_iv(term, 30)[0] > 0  # while iv30 drops that same node (dte >= 7)
+    assert len([n for n in nodes if n.dte >= 7]) == len(nodes) - 1
     resolve = cal.open_close(cal.next_session(chain.key.session, 5))[1]
     tt = trading_time(cal, chain.ts, resolve)
     w, quality = surface.total_variance_at(term, tt)

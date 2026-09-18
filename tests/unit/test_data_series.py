@@ -48,7 +48,9 @@ def bars_frame(cal: XnysCalendar) -> pd.DataFrame:
 
 
 def bars_table(cal: XnysCalendar) -> PitTable:
-    return PitTable(bars_frame(cal), name="bars:SPY", key="session", column_knowable=BARS_COLUMN_KNOWABLE, paths=["pq/bars/alpaca/SPY.parquet"])
+    return PitTable(
+        bars_frame(cal), name="bars:SPY", key="session", column_knowable=BARS_COLUMN_KNOWABLE, paths=["pq/bars/alpaca/SPY.parquet"]
+    )
 
 
 def daily_frame(cal: XnysCalendar, *, close_gate: str = "snapshot") -> pd.DataFrame:

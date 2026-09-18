@@ -114,13 +114,26 @@ def daily_returns(daily: pd.DataFrame, band: str) -> np.ndarray:
     return np.asarray(returns, dtype=float)
 
 
+def _is_degenerate(spread: float, values: np.ndarray) -> bool:
+    """True when a dispersion measure is zero to within floating-point noise.
+
+    A constant equity series is a real case, not a pathology: baseline 1 (cash) never trades, and a run that was halted
+    throughout is flat. `np.std` of a constant array is ~1e-21 rather than exactly 0, so an equality test would turn
+    "no risk taken" into a Sharpe of 1e16. The ratio has no meaning there; `nan` is the honest answer.
+    """
+    if not np.isfinite(spread):
+        return True
+    scale = max(1.0, float(np.max(np.abs(values))) if values.size else 1.0)
+    return spread <= 1e-12 * scale
+
+
 def sharpe(returns: np.ndarray, *, periods: int = TRADING_DAYS) -> float:
-    """Annualised Sharpe with `rf = 0` (V8). Fewer than two returns, or a zero standard deviation, give `nan`."""
+    """Annualised Sharpe with `rf = 0` (V8). Fewer than two returns, or a flat series, give `nan`."""
     values = np.asarray(returns, dtype=float)
     if values.size < 2:
         return float("nan")
     sd = float(np.std(values, ddof=1))
-    if sd == 0.0:
+    if _is_degenerate(sd, values):
         return float("nan")
     return float(np.mean(values)) / sd * float(np.sqrt(periods))
 
@@ -132,7 +145,7 @@ def sortino(returns: np.ndarray, *, periods: int = TRADING_DAYS) -> float:
         return float("nan")
     downside = np.minimum(values, 0.0)
     dd = float(np.sqrt(np.mean(np.square(downside))))
-    if dd == 0.0:
+    if _is_degenerate(dd, values):
         return float("nan")
     return float(np.mean(values)) / dd * float(np.sqrt(periods))
 

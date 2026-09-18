@@ -480,3 +480,119 @@ def test_a_naive_timestamp_is_refused_by_the_instant_lookups() -> None:
     calendar = build(THANKSGIVING_ROWS)
     with pytest.raises(ValueError, match="tz-aware"):
         calendar.session_of(datetime(2026, 11, 27, 17, 0))  # noqa: DTZ001 - the hostile input under test
+
+
+# ======================================================================================================================
+# Protocol conformance and the defensive edges
+# ======================================================================================================================
+
+
+def protocol_signature(protocol: type) -> dict[str, list[str]]:
+    import inspect
+
+    return {
+        name: [p for p in inspect.signature(getattr(protocol, name)).parameters if p != "self"]
+        for name in dir(protocol)
+        if not name.startswith("_") and callable(getattr(protocol, name, None))
+    }
+
+
+def test_the_broker_clock_matches_the_clock_protocol() -> None:
+    from jevbot.protocols import Clock
+
+    clock, _, _ = make_clock(broker_ts=T0, boottimes=[1.0, 1.0], local=T0)
+
+    for name, parameters in protocol_signature(Clock).items():
+        assert callable(getattr(clock, name, None)), name
+        import inspect
+
+        assert list(inspect.signature(getattr(clock, name)).parameters) == parameters, name
+
+
+def test_the_alpaca_calendar_matches_the_calendar_protocol() -> None:
+    from jevbot.protocols import Calendar
+
+    calendar = build(THANKSGIVING_ROWS)
+
+    for name, parameters in protocol_signature(Calendar).items():
+        import inspect
+
+        assert callable(getattr(calendar, name, None)), name
+        assert list(inspect.signature(getattr(calendar, name)).parameters) == parameters, name
+
+
+def test_an_already_localised_calendar_row_is_taken_as_it_stands() -> None:
+    class Row:
+        date = date(2026, 11, 27)
+        open = datetime(2026, 11, 27, 14, 30, tzinfo=UTC)
+        close = datetime(2026, 11, 27, 18, 0, tzinfo=UTC)
+
+    calendar = AlpacaCalendar([Row()])  # type: ignore[list-item]
+
+    assert calendar.open_close(date(2026, 11, 27)) == (Row.open, Row.close)
+
+
+@pytest.mark.parametrize(
+    ("attributes", "needle"),
+    [
+        ({"date": "2026-11-27", "open": datetime(2026, 11, 27, 9, 30), "close": datetime(2026, 11, 27, 16, 0)}, "not a calendar date"),  # noqa: DTZ001
+        ({"date": date(2026, 11, 27), "open": "09:30", "close": datetime(2026, 11, 27, 16, 0)}, "not a datetime"),  # noqa: DTZ001
+    ],
+)
+def test_a_malformed_calendar_row_is_refused(attributes: dict[str, object], needle: str) -> None:
+    row = type("Row", (), attributes)()
+
+    with pytest.raises(BrokerError, match=needle):
+        AlpacaCalendar([row])  # type: ignore[list-item]
+
+
+def test_a_cross_check_that_cannot_answer_the_range_is_tolerated() -> None:
+    class Blind(StubCalendar):
+        def sessions(self, start: date, end: date) -> list[date]:
+            raise ValueError("outside my bounds")
+
+    stub = Blind({date(2026, 11, 25): (datetime(2026, 11, 25, 14, 30, tzinfo=UTC), datetime(2026, 11, 25, 21, 0, tzinfo=UTC))})
+
+    calendar = AlpacaCalendar(calendar_models([("2026-11-25", "09:30", "16:00")]), cross_check=stub)  # type: ignore[arg-type]
+
+    assert calendar.alerts == ()
+    assert calendar.is_session(date(2026, 11, 25)) is True
+
+
+def test_a_cross_check_that_disagrees_about_the_open_is_alerted_without_changing_it() -> None:
+    session = date(2026, 11, 25)
+    stub = StubCalendar({session: (datetime(2026, 11, 25, 15, 0, tzinfo=UTC), datetime(2026, 11, 25, 21, 0, tzinfo=UTC))})
+    alerts: list[str] = []
+
+    calendar = AlpacaCalendar(
+        calendar_models([("2026-11-25", "09:30", "16:00")]),
+        cross_check=stub,  # type: ignore[arg-type]
+        on_alert=alerts.append,
+    )
+
+    assert calendar.open_close(session)[0] == datetime(2026, 11, 25, 14, 30, tzinfo=UTC)  # the venue's own open stands
+    assert any("broker open" in a for a in alerts)
+
+
+def test_navigation_beyond_the_loaded_window_raises() -> None:
+    calendar = build(THANKSGIVING_ROWS)
+
+    with pytest.raises(ValueError, match="lies outside"):
+        calendar.next_session(date(2026, 11, 30))
+    with pytest.raises(ValueError, match="lies outside"):
+        calendar.prev_session(date(2026, 11, 25))
+    with pytest.raises(ValueError, match="must be an int >= 1"):
+        calendar.next_session(date(2026, 11, 25), 0)
+    with pytest.raises(ValueError, match=r"must be a datetime\.date"):
+        calendar.is_session(datetime(2026, 11, 25, tzinfo=UTC))  # type: ignore[arg-type]
+
+
+def test_calendar_rows_reads_through_a_trading_client() -> None:
+    from jevbot.paper.clock import calendar_rows
+
+    client = FakeTradingClient(calendar=[("2026-11-25", "09:30", "16:00"), ("2026-11-27", "09:30", "13:00")])
+
+    rows = calendar_rows(client, date(2026, 11, 26), date(2026, 11, 30))
+
+    assert [row.date for row in rows] == [date(2026, 11, 27)]  # the request window is honoured
+    assert AlpacaCalendar(rows).is_early_close(date(2026, 11, 27)) is False  # one row: nothing to be early against

@@ -791,3 +791,135 @@ def test_no_daemon_worker_outlives_a_completed_call() -> None:
     broker.positions()
 
     assert threading.active_count() == before
+
+
+# ======================================================================================================================
+# Protocol conformance and the defensive edges
+# ======================================================================================================================
+
+
+def test_the_adapter_satisfies_the_broker_protocol() -> None:
+    from jevbot.protocols import Broker
+
+    broker, _ = make_broker()
+
+    assert isinstance(broker, Broker)  # @runtime_checkable (3.4): every method of the contract is really there
+
+
+def test_raw_clock_and_raw_calendar_go_through_the_adapter() -> None:
+    broker, client = make_broker()
+
+    clock = broker.raw_clock()
+    rows = broker.raw_calendar(date(2026, 9, 1), date(2026, 9, 30))
+
+    assert clock.timestamp == client.clock_timestamp
+    assert [row.date for row in rows] == [date(2026, 9, 17)]
+
+
+def test_a_raw_dict_response_fails_closed_instead_of_attribute_missing() -> None:
+    broker, client = make_broker()
+    client.get_clock = lambda: {"timestamp": "2026-09-17T19:45:00Z"}  # type: ignore[method-assign]
+
+    with pytest.raises(BrokerError, match="raw clock data"):
+        broker.raw_clock()
+
+
+def test_an_order_without_a_client_order_id_is_refused() -> None:
+    with pytest.raises(BrokerError, match="without a client_order_id"):
+        to_order_state(_Row({"status": "new", "qty": "1", "updated_at": datetime(2026, 9, 17, tzinfo=UTC)}))
+
+
+def test_a_non_numeric_quantity_is_refused() -> None:
+    with pytest.raises(BrokerError, match="not a number"):
+        to_broker_position(_Row({"symbol": "SPY", "qty": "lots", "side": "long"}))
+
+
+def test_an_activity_without_a_usable_date_is_refused() -> None:
+    broker, client = make_broker()
+    client.activities_rows.append({"id": "x", "activity_type": "OPASN", "symbol": "SPY", "qty": "1", "date": "not-a-date"})
+
+    with pytest.raises(BrokerError, match="unparsable date"):
+        broker.activities(date(2026, 9, 1))
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (400, BrokerRejected),
+        (401, BrokerRejected),
+        (403, BrokerRejected),
+        (422, BrokerRejected),
+        (408, BrokerAmbiguous),
+        (429, BrokerAmbiguous),
+        (500, BrokerAmbiguous),
+        (504, BrokerAmbiguous),
+        (None, BrokerAmbiguous),
+    ],
+)
+def test_the_classification_table_of_step_three_and_four(status: int | None, expected: type[Exception]) -> None:
+    from alpaca.common.exceptions import APIError
+
+    from jevbot.paper.broker import _classify
+    from tests.fixtures.fake_alpaca import api_error
+
+    error = APIError("upstream said no", None) if status is None else api_error(status, 12345678, "upstream said no")
+
+    assert isinstance(_classify(error), expected)
+
+
+def test_a_transport_error_is_always_ambiguous() -> None:
+    from jevbot.paper.broker import _classify
+
+    assert isinstance(_classify(TimeoutError("read timed out")), BrokerAmbiguous)
+    assert isinstance(_classify(ConnectionResetError("reset")), BrokerAmbiguous)
+
+
+def test_an_error_body_that_is_not_json_still_classifies() -> None:
+    from alpaca.common.exceptions import APIError
+
+    from jevbot.paper.broker import _classify
+    from tests.fixtures.fake_alpaca import _HttpError
+
+    classified = _classify(APIError("<html>gateway timeout</html>", _HttpError(403)))
+
+    assert isinstance(classified, BrokerRejected)
+    assert classified.reject_code is None  # no numeric code could be read; the tag and the text still reach the ledger
+    assert classified.status == 403
+
+
+class FlakyLookups(FakeTradingClient):
+    """A client whose lookups start failing after the first one: the pre-lookup answers, the later ones do not."""
+
+    def __init__(self, *, fail_after: int, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.fail_after = fail_after
+        self.lookups = 0
+
+    def get_order_by_client_id(self, client_id: str) -> object:
+        self.lookups += 1
+        if self.lookups > self.fail_after:
+            raise ConnectionResetError("connection reset by peer")
+        return super().get_order_by_client_id(client_id)
+
+
+def test_a_failing_lookup_during_the_ambiguity_window_does_not_mask_the_ambiguity() -> None:
+    client = FlakyLookups(fail_after=1)
+    broker, _ = make_broker(client, read_retries=0)
+    client.fail_next("connection_reset")
+
+    with pytest.raises(BrokerAmbiguous):
+        broker.submit(submit_credit_spread(broker))
+
+    assert broker.posts == 1  # still no second POST: an unreadable broker is not a licence to duplicate the order
+    assert client.lookups == 4  # the pre-lookup plus three that failed
+
+
+def test_a_pre_lookup_that_cannot_be_read_never_posts_at_all() -> None:
+    client = FlakyLookups(fail_after=0)
+    broker, _ = make_broker(client, read_retries=0)
+
+    with pytest.raises(BrokerAmbiguous):
+        broker.submit(submit_credit_spread(broker))
+
+    assert broker.posts == 0  # we could not tell whether the order exists, so we did not create one
+    assert client.calls.count("submit_order") == 0

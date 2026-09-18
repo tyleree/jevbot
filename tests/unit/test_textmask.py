@@ -304,7 +304,8 @@ def test_the_benign_corpus_survives_and_is_rendered_as_the_state_expects(terms: 
     items = cases.as_items(rows, as_of=AS_OF)
     lists, stats = prepare_news(items, AS_OF, CUTOFF, _cfg(), terms, UNDERLYINGS)
     assert stats.kept == 8 and stats.dropped == 4  # news.max_items = 8, newest first
-    assert stats.ids == ("b01", "b02", "b03", "b04", "b05", "b06", "b07", "b08")[::-1] or stats.kept == 8
+    assert stats.ids == ("b05", "b04", "b03", "b02", "b01", "b06", "b07", "b08")
+    assert stats.kept_recent == 5 and len(lists[RECENT_KEY]) == 5 and len(lists[EARLIER_KEY]) == 3
     for item in [*lists[RECENT_KEY], *lists[EARLIER_KEY]]:
         assert set(item) == {"age", "source_type", "headline", "summary"}
         assert item["source_type"] in vocab.NEWS_SOURCE_TYPES

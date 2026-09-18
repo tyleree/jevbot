@@ -893,6 +893,87 @@ def test_scan_on_an_empty_window_returns_the_empty_frame() -> None:
     assert frame.empty and list(frame.columns) == list(scan_columns())
 
 
+def test_scan_falls_back_to_the_only_slot_a_session_has() -> None:
+    cfg = Config()
+    session = date(2024, 5, 17)
+    exec_only = make_chain("SPY", session=session, slot=Slot.EXEC, fidelity=Fidelity.RECORDED_INDICATIVE)
+    frame = scan(cfg, StubProvider([exec_only]), xnys(), session, session, fill_model=StubFillModel(cfg))
+    assert (frame["sessions"] == 1).all() and (frame["tradable"] > 0).any()
+
+
+def test_scan_skips_a_key_whose_snapshot_is_missing() -> None:
+    cfg = Config()
+    session = date(2024, 5, 17)
+
+    class Holed(StubProvider):
+        def get_chain(self, underlying: str, key: SnapshotKey) -> ChainSnapshot | None:
+            return None
+
+    frame = scan(cfg, Holed([make_chain("SPY", session=session)]), xnys(), session, session, fill_model=StubFillModel(cfg))
+    assert frame.empty
+
+
+# ======================================================================================================================
+# internals worth pinning on their own (the boundary branches the public path rarely reaches)
+# ======================================================================================================================
+
+
+def test_the_at_the_money_iv_interpolates_between_the_bracketing_strikes() -> None:
+    from jevbot.candidates import _atm_iv
+
+    chain = make_chain()
+    expiry = target_expiry(chain, 35)
+    forward = chain.forward(expiry)
+    sigma = _atm_iv(chain, expiry)
+    assert sigma is not None
+    rows = chain.table[(chain.table["expiry"] == pd.Timestamp(expiry)) & chain.table["iv"].notna()]
+    per_strike = rows.groupby("strike_milli")["iv"].mean().sort_index()
+    below = per_strike[per_strike.index <= forward * 10]
+    above = per_strike[per_strike.index >= forward * 10]
+    lo, hi = float(below.iloc[-1]), float(above.iloc[0])
+    assert min(lo, hi) <= sigma <= max(lo, hi)
+    # a forward outside the listed range falls back to the nearest strike's IV
+    narrow = make_chain("SPY", spot=45_000, moneyness_window=0.02)
+    assert _atm_iv(narrow, target_expiry(narrow, 35)) is not None
+    assert _atm_iv(chain, date(2100, 1, 15)) is None  # an expiry the chain does not list
+
+
+def test_an_unreachable_expected_move_requirement_is_a_short_delta_reject() -> None:
+    chain = make_chain()
+    absurd = cfg_with(candidates=CandidatesConfig(credit_short_min_em=100.0))
+    result = generator(absurd).build(StructureKind.PUT_CREDIT, view_of(chain), "SPY", budget_floor=DEFAULT_FLOOR)
+    assert isinstance(result, CandidateReject) and result.rejects == ("delta_target_unreachable:short",)
+    condor = generator(absurd).build(StructureKind.IRON_CONDOR, view_of(chain), "SPY", budget_floor=DEFAULT_FLOOR)
+    assert isinstance(condor, CandidateReject) and condor.rejects == ("delta_target_unreachable:short_put",)
+
+
+def test_the_economics_bounds_reject_an_impossible_price() -> None:
+    """A credit at or above the width (or a non-positive max loss) is `economics_invalid` - the 9.2 result `<= 0` rule."""
+    cfg = Config()
+    gen = generator(cfg)
+    chain = make_chain()
+    candidate = built(gen.build(StructureKind.PUT_CREDIT, view_of(chain), "SPY", budget_floor=DEFAULT_FLOOR))
+    structure = candidate.structure
+    assert structure.width == 500
+    impossible = BandPrices(orats=-600, worst=-600, mid=-600)  # a $6 credit on a $5-wide spread
+    assert gen._economics(structure, impossible, -10_000) == ["economics_invalid", "credit_to_width"]
+    assert gen._economics(structure, BandPrices(orats=-74, worst=-72, mid=-76), 42_818) == []
+    # a debit structure priced at a credit, and a long single priced at a credit
+    debit = built(gen.build(StructureKind.CALL_DEBIT, view_of(chain), "SPY", budget_floor=DEFAULT_FLOOR)).structure
+    assert gen._economics(debit, BandPrices(orats=-10, worst=-10, mid=-10), -1_000) == ["economics_invalid"]
+    single = built(gen.build(StructureKind.LONG_CALL, view_of(chain), "SPY", budget_floor=DEFAULT_FLOOR)).structure
+    assert gen._economics(single, BandPrices(orats=-10, worst=-10, mid=-10), -1_000) == ["economics_invalid"]
+    assert gen._economics(single, BandPrices(orats=470, worst=471, mid=469), 47_110) == []
+
+
+def test_the_generator_exposes_its_configuration_and_headline_band() -> None:
+    cfg = Config()
+    gen = generator(cfg)
+    assert gen.cfg is cfg and gen.headline is Band.ORATS
+    worst_cfg = cfg_with(cadence=CadenceConfig(fill_rule=FillRule.SAME_SNAPSHOT_WORST))
+    assert generator(worst_cfg).headline is Band.WORST
+
+
 def test_scan_tiers_are_the_non_zero_sizing_tiers_of_7_6() -> None:
     cfg = Config()
     assert SCAN_TIERS == (500_000, 750_000, 1_000_000)

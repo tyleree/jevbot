@@ -78,7 +78,9 @@ def test_layout_spells_every_entry_of_the_13_1_tree(data_store: DataStore) -> No
     assert s.news_partition(2025, 3) == root / "pq" / "news" / "alpaca" / "year=2025" / "month=03.parquet"
     assert s.news_coverage_path() == root / "pq" / "news" / "alpaca" / "coverage.parquet"
     assert s.recorded_chain("SPY", date(2026, 2, 3), Slot.DEC) == root / "recorded" / "SPY" / "date=2026-02-03" / "chain_dec.parquet"
-    assert s.recorded_underlying("SPY", date(2026, 2, 3), Slot.EOD) == root / "recorded" / "SPY" / "date=2026-02-03" / "underlying_eod.parquet"
+    assert (
+        s.recorded_underlying("SPY", date(2026, 2, 3), Slot.EOD) == root / "recorded" / "SPY" / "date=2026-02-03" / "underlying_eod.parquet"
+    )
     assert s.recorded_news(date(2026, 2, 3)) == root / "recorded" / "news" / "date=2026-02-03" / "news.jsonl"
     assert s.recorded_close("SPY", date(2026, 2, 3)) == root / "recorded" / "closes" / "SPY" / "date=2026-02-03.json"
     assert s.recorded_manifest(date(2026, 2, 3)) == root / "recorded" / "manifest" / "date=2026-02-03.json"
@@ -303,7 +305,9 @@ def test_selected_paths_cover_the_window_and_nothing_else(data_store: DataStore)
         "pq/volidx/VIX.parquet",
     ]
     # another provider selects its own enriched dataset
-    other = [data_store.relative(p) for p in data_store.selected_paths(StubProvider("synthetic"), ["SPY"], date(2015, 1, 1), date(2015, 6, 1))]
+    other = [
+        data_store.relative(p) for p in data_store.selected_paths(StubProvider("synthetic"), ["SPY"], date(2015, 1, 1), date(2015, 6, 1))
+    ]
     assert "pq/enriched/synthetic/SPY/year=2015.parquet" in other and not [p for p in other if "enriched/mirror" in p]
     # a subset of tables selects a subset of files
     chains_only = data_store.selected_paths(provider, ["SPY"], date(2015, 1, 1), date(2015, 12, 31), tables=["enriched"])

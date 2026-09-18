@@ -351,12 +351,6 @@ class _Wing:
             return (long_leg,)
         return (Leg(contract=self.short.contract, side=Side.SELL), long_leg)
 
-    def quotes(self, position: int) -> dict[str, Quote]:
-        out = {self.long(position).contract.occ: self.long(position).quote}
-        if self.short is not None:
-            out[self.short.contract.occ] = self.short.quote
-        return out
-
 
 def _nearest(rows: Sequence[_Row], target: float, otm_step: int) -> int | None:
     """`argmin |abs(delta) - target|`; ties => the strike further OTM (section 8). None when `rows` is empty."""
@@ -854,6 +848,9 @@ def scan(
                 if result.rejects:
                     continue
                 cell["tradable"] += 1
+                # 9.3: `qty_requested >= 1` for every non-zero tier BY CONSTRUCTION of the budget fit (`budget_floor` is the
+                # LOWEST tier's budget), so these counters stay 0 on a healthy configuration - which is exactly what makes a
+                # non-zero one worth reporting: it means the fit and the sizing arithmetic disagree.
                 for tier in SCAN_TIERS:
                     qty = min(budgets[tier] // result.max_loss_per_contract, max_contracts) if result.max_loss_per_contract > 0 else 0
                     if qty < 1:
