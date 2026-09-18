@@ -678,8 +678,18 @@ def test_news_align_for_bearish_and_neutral_structures() -> None:
         facts(news_enabled=True, news_count=3, news_recent_count=0, trend_code="flat", iv_rv_code="iv_rich"),
         text,
     )
-    # neutral_range => 1 - abs(tone) = 0.40
-    assert neutral.features_ppm["news_align"] == 400_000
+    # neutral_range => 0.5 - 0.5*abs(tone) = 0.20 (DESIGN 7.5 corrected: the printed `1 - abs(tone)` is 1.0 at tone 0,
+    # contradicting its own "= 0.5 when tone == 0", and would give every condor a rank bonus whenever news is off)
+    assert neutral.features_ppm["news_align"] == 200_000
+    # with no material text, every branch - neutral included - sits at the 0.5 midpoint, so absent news reorders nothing
+    silent = text_answers(text__material_present=noul(0.10), text__clearly_positive=noul(0.70), text__clearly_negative=noul(0.10))
+    neutral_silent = decide(
+        rules(),
+        core_answers(**_mapping_overrides(StructureKind.IRON_CONDOR)),
+        facts(news_enabled=True, news_count=3, news_recent_count=0, trend_code="flat", iv_rv_code="iv_rich"),
+        silent,
+    )
+    assert neutral_silent.features_ppm["news_align"] == 500_000
 
 
 @pytest.mark.parametrize(

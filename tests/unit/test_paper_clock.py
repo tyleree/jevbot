@@ -411,8 +411,11 @@ def test_a_session_only_one_calendar_knows_is_alerted_in_both_directions() -> No
         on_alert=alerts.append,
     )
 
-    assert calendar.is_session(broker_only) is True  # the venue's own calendar decides WHICH days the account can trade
-    assert calendar.is_session(date(2026, 11, 27)) is False
+    # The session set is the UNION: a day either calendar lists is kept, because a day we call a non-session gets no
+    # cycle at all, so a mandatory expiry exit on it would silently never happen (INV-11, INV-21). Both directions alert.
+    assert calendar.is_session(broker_only) is True
+    assert calendar.is_session(date(2026, 11, 27)) is True
+    assert calendar.open_close(date(2026, 11, 27))[1] == datetime(2026, 11, 27, 18, 0, tzinfo=UTC)  # the cross-check's 13:00 ET close
     assert [a for a in alerts if "the cross-check does not" in a and "2026-11-26" in a]
     assert [a for a in alerts if "the broker does not" in a and "2026-11-27" in a]
     assert calendar.alerts == tuple(alerts)

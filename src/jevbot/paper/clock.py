@@ -26,7 +26,6 @@ offsets from that day's close (`offset_from_close`); this module contains no tim
 
 import time
 from bisect import bisect_left, bisect_right
-from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as DayTime
