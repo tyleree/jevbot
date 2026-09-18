@@ -1,0 +1,24 @@
+# jevbot - overrides for the PAPER profile (DESIGN.md sections 4 and 11). Alpaca PAPER trading only: there is no live-trading code path.
+#
+# Usage: jevbot paper run --config config/paper.toml
+# Merged on top of config/default.toml; tables merge key by key, every other value replaces.
+#
+# In paper mode the CLI refuses `-o section.key=value` for the sections [risk] [kill] [health] [orders] [dte] [exits]
+# (config.PROTECTED_SECTIONS_PAPER): the service's limits come from files under version control only. To change a limit, edit a
+# TOML file, commit it, and restart the service. Secrets are never written here (D29).
+
+[run]
+mode = "paper"                   # `jevbot paper run` refuses to start unless run.mode = "paper"
+purpose = "paper"                # paper forces "paper" (config.resolve() sets it whatever a file says)
+
+[jev.cache]
+mode = "record"                  # paper forces "record": a cache miss calls the live model (config.resolve() sets it whatever a file says)
+
+# Everything else keeps its default on purpose:
+# - [decider] kind = "auto": MockJev while TYPESAFE_API_KEY is absent (D7), live Jev once it is set.
+# - [news] enabled = "auto": with live Jev, news stays OFF (news_reason = "text_probe_pending") until the hostile-text probe
+#   (`jevbot jev probe-step0 --suite text`, P-JEV-6) is recorded for the pinned model; with MockJev it resolves ON when the Alpaca
+#   paper keys are present (V12). The recorder archives news in every case.
+# - [rules] perturbation_scope_paper = "passing": "off" is refused with live Jev until the Step 0 determinism and order records exist.
+# - [orders] repost_same_id = false: enable ONLY after probe P-ALP-2 recorded that duplicate client ids are rejected (V4).
+# - [paper] wind_down = false: set true (in a committed file) for the model-change / shutdown procedure of DESIGN 12.9.

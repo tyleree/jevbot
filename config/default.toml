@@ -1,0 +1,359 @@
+# jevbot - default configuration: EVERY key with its default (DESIGN.md section 4).
+#
+# Merge order: config/default.toml <- --config FILE (repeatable, in order) <- CLI -o section.key=value.
+# Tables merge key by key; every other value (scalars, arrays) replaces. Unknown keys are a startup error.
+# There are NO environment-variable config overrides and NO secrets in TOML (D29): the only environment names are the
+# constants JEVBOT_DATA, TYPESAFE_API_KEY, ALPACA_PAPER_KEY, ALPACA_PAPER_SECRET of src/jevbot/config.py.
+# In paper mode `-o` is refused for the sections [risk] [kill] [health] [orders] [dte] [exits]
+# (config.PROTECTED_SECTIONS_PAPER): the service's limits come from files under version control only.
+# Probabilities are decimals; thresholds sit off the 0.01 grid because Jev outputs look quantised to 0.01 (B2.2).
+# tests/unit/test_config.py asserts that this file equals the fenced toml block of DESIGN.md section 4, key for key.
+
+[run]
+experiment = "exp001"            # experiment label; part of the namespace (D12)
+family = ""                      # trial family for the Deflated Sharpe count (12.6); "" => the run.experiment value; CLI --family overrides it
+mode = "backtest"                # "backtest" | "paper"   (there is no other value; D2)
+purpose = "validate"             # "validate" | "tune" | "diagnostic" | "final" | "reference"  (paper forces "paper"); "tune" is refused on post-release
+                                 # sessions; "tune" / "final" with a Jev decider need the Step 0 records of THIS model + question sets (6.8);
+                                 # "reference" = the Jev-free reference-history run of 12.1 (MockJev only)
+seed = 20260917                  # seeds every RNG (random baseline, bootstrap, placebo permutation, synthetic paths)
+ledger_forecasts = true          # false ONLY for baseline 4 seeds and shadow stores: their FORECAST / OUTCOME entries would be redundant (12.4, 11.8)
+initial_equity_usd = 100000      # backtest starting equity; paper reads it from the broker on first start
+start = "2012-01-03"             # backtest window (inclusive)
+end = "2025-12-12"
+
+[paths]
+data_dir = ""                    # "" => $JEVBOT_DATA => "/home/tyler/jevbot-data" (D1). Must be outside the git repo (checked), mode 700
+env_file = ".env"                # git-ignored; KEY=VALUE lines; never overrides variables already set; mode 600 enforced
+
+[universe]                       # D3 (user-tunable)
+underlyings = ["SPY", "QQQ", "IWM"]
+penny_all = ["SPY", "QQQ", "IWM"]      # classes quoted in $0.01 at any price (B4.2)
+[universe.alias]
+SPY = "UNDERLYING_A"
+QQQ = "UNDERLYING_B"
+IWM = "UNDERLYING_C"
+[universe.kind]
+SPY = "broad US large-cap equity index ETF"
+QQQ = "US large-cap growth and technology equity index ETF"
+IWM = "US small-cap equity index ETF"
+[universe.iv_proxy]              # Cboe index used ONLY to back-fill holes in the own-IV history (5.4)
+SPY = "VIX"
+QQQ = "VXN"
+IWM = "RVX"
+
+[structures]
+enabled = ["long_call", "long_put", "call_debit_spread", "put_debit_spread",
+           "call_credit_spread", "put_credit_spread", "iron_condor"]
+
+[cadence]                        # D4: offsets from that day's calendar close, never clock times (INV-13)
+decide_offset_min = 25           # paper: take the `dec` snapshot and start the cycle this many minutes before the close
+exec_offset_min = 20             # paper: take the `exec` snapshot and open the order ladder
+order_cutoff_offset_min = 5      # no submissions after close - 5 min (G4)
+cancel_all_offset_min = 4        # every resting order is cancelled at close - 4 min
+decision_deadline_offset_min = 17   # entries not decided by close - 17 min are dropped (fail closed); hard exits are still submitted
+eod_offset_min = -2              # negative = minutes AFTER the close: `eod` snapshot for marks
+post_close_offset_min = -10      # final reconcile, SESSION_END, shadow replay
+morning_reconcile_after_open_min = 10
+min_session_minutes = 120        # skip entries on a session shorter than this (defensive)
+fill_rule = "next_snapshot"      # backtest headline (decide D, fill D+1) | "same_snapshot_worst" (sensitivity)
+recorded_mode = "dec_exec"       # replay of recorded days: "dec_exec" (decide dec, fill exec, mark eod) | "eod_eod" (decide eod, fill next eod)
+
+[dte]                            # D5
+target = 35                      # calendar days
+min_entry = 28
+max_entry = 45
+time_exit_short_premium = 7      # close when calendar DTE <= this (credit verticals, condor)  [D5 default]
+time_exit_long_premium = 7       # close when calendar DTE <= this (long options, debit verticals)
+hard_exit_sessions = 3           # mandatory close when sessions_to_expiry <= this (INV-11), counted to L = last_session: decided L-3, fills L-2, forced retry L-1
+min_sessions_beyond_hard_exit = 5   # never open an expiry with sessions_to_expiry <= hard_exit_sessions + this
+hold_horizon_sessions = 20       # holding window shown to Jev; horizon of the *_hold eval questions
+
+[candidates]                     # section 8
+long_delta = 0.35                # |delta| target for long_call / long_put (the budget fit may step further OTM, never below long_min_delta)
+long_min_delta = 0.15            # long singles: the furthest-OTM |delta| the budget fit may reach; below it => candidate:exceeds_risk_budget
+debit_long_delta = 0.50          # a PREFERENCE: the budget fit may move the long leg toward the short leg (section 8)
+debit_short_delta = 0.25
+credit_short_delta = 0.25
+credit_long_delta = 0.12         # a PREFERENCE / outer bound: the budget fit may move the long leg toward the short leg (narrower wing)
+condor_short_delta = 0.16
+condor_long_delta = 0.07         # a PREFERENCE / outer bound, as above
+delta_tolerance = 0.08           # SHORT legs (and long singles' starting strike) only: reject if the nearest listed |delta| is further than this from the target
+max_unsizeable_rate = 0.25       # `data scan-candidates`: an enabled (underlying, kind) whose candidates are exceeds_risk_budget / size_zero at the LOWEST
+                                 # non-zero tier more often than this in the latest scanned year blocks purpose "final" and the paper boot (section 8)
+credit_short_min_em = 0.80       # credit short strike must be >= 0.8 expected moves (to expiry) from spot; else step further OTM
+min_width_strikes = 1
+max_width_pct_spot = 0.03        # clamp the wing so width <= 3% of spot
+min_credit_to_width = 0.12       # verticals, at the ORATS band (feasible for 0.25/0.12 deltas: expected ~0.17-0.22)
+max_credit_to_width = 0.50
+condor_min_credit_to_width = 0.17   # total credit / max wing width (feasible for 0.16/0.07 deltas: expected ~0.20-0.25)
+condor_max_credit_to_width = 0.60
+max_debit_to_width = 0.60
+min_two_sided_frac = 0.60        # drop an expiry when fewer than this share of strikes within +/- 2 expected moves are two-sided
+
+[liquidity]                      # B7.4; applied per leg at candidate time, at approve() time, and by the fill model. NO same-day volume.
+min_bid_cents_sold = 10
+min_bid_cents_bought = 1
+max_rel_spread = 0.15            # (ask-bid)/mid, legs with mid >= 50 cents
+max_abs_spread_cents = 10        # legs with mid < 50 cents
+min_open_interest = 100          # on oi_prev (PIT-safe)
+allow_missing_open_interest = true
+max_pct_displayed_size = 0.50    # qty <= this * displayed size on the side we hit (when size is known and > 0)
+max_pct_open_interest = 0.05
+
+[exits]                          # hard exits, code only (9.4)
+profit_target_frac = 0.50        # credit/debit-vertical: close at >= 50% of max profit; long options: gain >= 50% of debit
+stop_loss_frac = 0.50            # close when loss >= 50% of max loss (long options: 50% of debit)
+ex_dividend_guard = true         # acts only when a verified ex_dividend event exists (D23)
+ex_div_exit_sessions = 2         # close an ITM short call when the verified ex-date is <= 2 sessions away (D+1 fills!)
+assignment_extrinsic_floor_cents = 10   # any ITM short leg with extrinsic (ask - intrinsic) below this => exit
+assignment_sim_itm = 0.05        # backtest-only fallback: short leg >= 5% ITM ...
+assignment_sim_dte = 4           # ... within 4 calendar days of expiry and still held => simulated assignment (reported separately)
+
+[rules]                          # section 7
+min_score = 0.555
+veto_hi = 0.705
+veto_lo = 0.295
+perturbation_variants = ["opt_perm", "key_perm", "bucket_only"]
+perturbation_scope_backtest = "all"      # "all" (every entry request gets all variants => sweeps replay with zero misses) | "passing" | "off"
+perturbation_scope_paper = "passing"     # "off" is refused in paper until a Step 0 result is recorded (config validation)
+reentry_cooldown_sessions = 3
+manage_use_jev = "on"            # "on" | "off" (code-only; lets trade-list-changing sweeps replay) | "cached_only" (shadow replay)
+exit_pressure_enter = 0.705      # hysteresis: latch exit at X >= this
+exit_pressure_release = 0.445    # hysteresis: release latch only at X < this
+text_watch_alert_sessions = 2    # unconfirmed adverse text for this many consecutive sessions raises an ALERT (RISK_EVENT text_watch). It NEVER closes (INV-16)
+text_rank_weight = 0.05          # S_rank = (1 - w) * S_core + w * news_align   (ranking ONLY)
+code_crosschecks = true          # 7.3; false ONLY for baseline 3 (always-enter), which flags the run
+[rules.weights]                  # composite S_core (text-free; sum = 1.0)
+align = 0.30
+volfit = 0.20
+fit = 0.20
+regimefit = 0.15
+calm = 0.15
+[rules.gates.direction]          # under.direction (4 options)
+p_top = 0.595
+margin = 0.245
+[rules.gates.vol_stance]         # vol.stance (4 options)
+p_top = 0.595
+margin = 0.245
+[rules.gates.structure]          # fit.structure_family (8 options => lower bar)
+p_top = 0.495
+margin = 0.195
+[rules.gates.action]             # pos.action (4 options) - the loosest bar: closing reduces risk
+p_top = 0.545
+margin = 0.195
+[rules.tiers]
+score = [[0.755, 1.0], [0.655, 0.75], [0.555, 0.5]]        # S_core >= a => tier b; else 0
+peakedness = [[0.805, 1.0], [0.705, 0.75], [0.595, 0.5]]   # min(p_top direction, p_top vol_stance)
+environment = [1.0, 0.75, 0.5, 0.0]                        # by max(round_half_up(mean), top) of risk.environment, level 0..3
+
+[risk]                           # D17 (all user-tunable)
+max_loss_per_trade_pct = 0.01
+max_aggregate_open_loss_pct = 0.10
+max_open_structures = 6
+max_new_per_day = 2
+one_per_underlying_direction = true
+max_same_direction_structures = 3    # exact code-side replacement for a fuzzy correlated-exposure question
+daily_loss_halt_pct = 0.02       # => no new entries for the rest of the day
+drawdown_kill_pct = 0.08         # peak-to-trough => kill switch
+max_bp_utilisation = 0.50        # reserved BP <= this * equity
+bp_haircut_mult = 1.00           # multiplier on the Cboe-minimum requirement
+condor_bp_mode = "sum_wings"     # "sum_wings" (conservative until probe P-ALP-5) | "max_wing"
+bp_drift_halt_pct = 0.10         # paper: broker options BP lower than our model predicts by > this * equity => halt entries
+event_blackout_sessions = 1      # no new SHORT-PREMIUM entries when an fomc_decision is within this many sessions - measured at the decision AND
+                                 # re-measured at the delayed fill snapshot (recheck_fill, 9.3), so a D+1 fill can never land inside the blackout
+max_adverse_drift = 0.25         # entry abandoned if natural at the fill snapshot / current rung is > 25% worse than at the decision
+max_contracts_per_trade = 10
+max_order_notional_usd = 15000   # abs(limit) * 100 * qty for debits; width * 100 * qty for credits
+max_orders_per_minute = 10       # OPEN / discretionary CLOSE only; mandatory exits and KILL orders are exempt
+max_order_attempts = 6           # per intent; mandatory exits and KILL orders are exempt
+equity_basis = "min_broker_book" # paper: size off min(broker equity, book headline equity)
+
+[kill]                           # kill-sequence execution (9.5)
+cushion_ticks = 3                # mandatory / kill closes may go this many ticks past natural per extra attempt ...
+cushion_max_frac_width = 0.15    # ... capped at 15% of the structure's width (single legs: 15% of natural)
+flatten_attempts = 4
+flatten_wait_s = 30
+not_flat_retry_s = 300
+cancel_wait_s = 20
+post_open_delay_min = 15         # a kill tripped while the market is closed flattens this long after the next open ...
+post_open_delay_urgent_min = 2   # ... unless a position is inside its hard-exit window / expires today / an assignment was seen
+backtest_behaviour = "flatten_and_cooldown"   # | "stop_run"
+backtest_cooldown_sessions = 20  # then auto re-arm WITH peak reset (modelling assumption, flagged; differs from manual re-arm in paper)
+[kill.actions]                   # deviation V2; every D17 trigger is present
+operator = "kill"
+drawdown = "kill"
+reconcile_mismatch = "kill"
+model_mismatch = "kill"
+expiry_violation = "kill"
+assignment = "kill"
+ledger_corrupt = "kill"
+order_rate = "kill"
+clock_skew = "halt_then_kill"
+stale_quotes = "halt_then_kill"  # D17: halt entries at once; KILL after health.stale_kill_after_sessions consecutive stale sessions WHILE POSITIONS ARE OPEN
+                                 # (with a flat book a stale feed only halts: there is nothing to flatten). The flatten prices at natural + cushion and
+                                 # walks, so it tolerates bad quotes. Setting any trigger to plain "halt" is allowed but flags KILL_DISABLED:<trigger> (V2).
+jev_errors = "halt_then_kill"
+broker_errors = "halt_then_kill"
+
+[health]                         # thresholds for the non-P&L triggers
+max_clock_skew_ms = 5000         # D25
+clock_skew_kill_after_s = 900    # skew persisting this long during market hours
+max_chain_age_s = 120            # paper: our fetch must be this fresh at decision time (received_at vs broker now)
+max_quote_age_s = 1200           # paper: per-quote FEED timestamp age. PROVISIONAL until probe P-ALP-8 (indicative feed may be delayed; G2, G14b)
+max_stale_quote_frac = 0.20
+min_two_sided_frac = 0.60
+stale_kill_after_sessions = 3    # consecutive stale decision snapshots WITH >= 1 open position => STALE_QUOTES escalates from halt to kill (9.5);
+                                 # the counter resets on a fresh snapshot or when the book is flat. Hard exits keep running throughout (INV-21)
+jev_error_kill_after_sessions = 3   # consecutive SESSIONS with a transient decider failure (never requests; never auth/spend errors)
+broker_error_halt_after = 2      # consecutive failed broker calls => halt entries
+broker_error_kill_after = 6      # consecutive failed broker calls ON THE EXIT PATH
+max_stale_mark_sessions = 3
+
+[fees]                           # D14 / G11, USD per contract per side unless noted
+orf = 0.015
+occ = 0.025
+taf_sell = 0.00329
+cat = 0.0003
+sec_sell_rate = 0.0000206        # x sell notional
+commission = 0.0
+
+[fills]                          # D13
+orats_p = [0.75, 0.66, 0.56, 0.53]      # by number of legs 1,2,3,4+
+max_rel_spread = 0.25            # fill-time rejection (looser than the entry liquidity filter)
+max_abs_spread_cents = 15
+forced_penalty_frac_spread = 0.10   # mandatory exit: worst band + 10% of each leg's spread (min 1 tick) per leg
+forced_no_quote_pad_cents = 5    # no usable quote: max(intrinsic, last mark) + pad on buys; max(intrinsic - pad, 0) on sells
+
+[orders]                         # paper
+entry_ladder = [0.50, 0.75, 1.00]    # rungs as the fraction of the way from mid to natural; never past natural
+exit_ladder = [0.50, 1.00]           # discretionary closes; mandatory closes start at 1.00 then add the kill cushion
+ladder_step_s = 45
+poll_s = 2
+http_timeout_s = [3.05, 10.0]    # (connect, read) on every Alpaca call (D18)
+call_deadline_s = 15             # hard wall-clock deadline per broker call (worker thread)
+read_retries = 2                 # OUR retry policy for idempotent reads; writes are never retried blindly
+ambiguous_lookups = 3            # lookups by client id over ~10 s after an ambiguous submit
+repost_same_id = false           # V4: enable ONLY after probe P-ALP-2 recorded that duplicates are rejected
+rest_calls_per_minute = 180      # token bucket under Alpaca's ~200/min
+
+[jev]                            # D6-D9
+model = "jev-1.13.0"
+model_release_date = "2026-09-15"    # property of the namespace; drives evidence tiers
+sdk_version = "0.6.0"            # asserted against typesafe_sdk.__version__
+refresh_generation = 0           # bump => new namespace ("refresh")
+timeout_s = 8.0                  # per HTTP operation
+retry_max = 2                    # OUR retry loop; the SDK is always called with RetryPolicy(max_retries=0) so every attempt is metered
+retry_backoff_s = [0.5, 2.0]
+max_concurrency = 4
+max_rps = 10                     # far below 1,200 / min
+max_tokens_per_s = 100000        # far below 250k / s
+[jev.cache]
+mode = "replay"                  # "record" | "replay" | "refresh"; backtests default to replay (G12); paper forces "record"
+[jev.spend]
+max_input_tokens_per_run = 250000000     # ~ $10.50; batch scope only. Above the documented full record run of 6.7 (~230M)
+max_input_tokens_per_day = 300000000     # ~ $12.60 per UTC day for the BATCH scope (all backtests / probes / leakage runs together). Deliberately ABOVE the
+                                         # per-run ceiling, so the documented full record run finishes inside one UTC day; a smaller value is legal - the
+                                         # --yes-spend plan then prints how many UTC days the run will span and the --resume command (6.7)
+paper_max_input_tokens_per_day = 1000000 # PAPER scope ceiling (~ $0.04); a normal day uses < 150k. Counted separately: a batch stop never blocks paper (INV-17)
+estimate_chars_per_token = 3.0           # used for reservations and when usage.input_tokens is None; recalibrated by Step 0
+estimate_overhead_tokens = 300
+
+[decider]
+kind = "auto"                    # "auto" | "live" | "replay" | "mock"; auto = mock when TYPESAFE_API_KEY is absent (D7),
+                                 # else live in paper mode and per jev.cache.mode in backtests. Resolved ONCE; recorded in RUN_START.
+mock_profile = "full"            # "full" (baseline 7 / D11 ablation comparator) | "trend_ivrank" (baseline 5)
+
+[state]
+render = "value_and_bucket"      # "value_and_bucket" | "bucket_only"   (bucket_only = the D11 ablation arm)
+max_chars = 12000                # soft cap: news is trimmed to fit
+hard_max_chars = 16000           # StateTooLarge
+unmasked = false                 # true ONLY for the leakage diagnostic (adds ticker/date/price; run flagged "unmasked"; can never trade)
+
+[news]                           # D11
+enabled = "auto"                 # "auto" | "on" | "off". Resolved ONCE at run start by config.resolve() (rule above; V12), recorded with its reason, hashed.
+                                 # auto = on iff ALPACA_PAPER_KEY is set AND (not paper-with-live-Jev OR the text probe is recorded for the pinned model)
+lookback_hours = 72
+lag_s = 60                       # knowable_at = created_at + lag_s (historical archive)
+max_items = 8
+max_headline_chars = 200
+max_summary_chars = 300
+max_total_chars = 4000
+max_symbols_per_item = 3
+mask = true
+mask_terms_file = "config/mask_terms.toml"
+# (There is NO hand-editable "probe recorded" flag: the P-JEV-6 gate reads the probe RECORD keyed by model id under probes/step0/records, 6.8.)
+
+[data]
+provider = "mirror"              # "mirror" | "synthetic" | "recorded"   (paper mode always uses alpaca live + recorder)
+spot_measure = "auto"            # "parity" | "file_close" | "auto" (file_close iff `data verify --deep` recorded underlying_unadjusted_verified = true)
+max_dte = 120
+moneyness_window = 0.35          # |ln(K / fwd)| kept in enriched chains
+cboe_indices = ["VIX", "VIX9D", "VIX3M", "VVIX", "SKEW", "VXN", "RVX"]
+mirror_repo = "https://github.com/anahatsingh-ui/options-dataset-hist"
+min_history_sessions = 126       # minimum look-back (in SESSIONS) for percentile / rank features, else "unavailable"
+iv_rank_lo_pct = 2               # iv_rank is measured against the 2nd..98th percentile band of the window, clipped to [0, 100] (robust to one bad snapshot, 5.3)
+iv_rank_hi_pct = 98
+atm_iv_tolerance = 0.10          # |fit ATM IV / two-strike ATM IV - 1| above this logs ANOMALY atm_iv_divergence for that expiry
+fomc_knowable_days = 45          # stated assumption for HISTORICAL scheduled meetings (stored with each row)
+exdiv_knowable_days = 14         # stated assumption for HISTORICAL ex-dates (G8)
+[data.fomc]
+expected_per_year = 8            # `data fetch fomc` validator: 8 SCHEDULED, non-cancelled meetings per complete year, else it fails loudly ...
+# ... unless the year has an explicit exception with a source URL. Exceptions are never assumed: the operator adds one after reading the saved page.
+# [[data.fomc.exceptions]]
+# year = 2020
+# expected = 7                   # 7 is the only other accepted value
+# reason = "a scheduled meeting is marked cancelled on the source page"
+# source_url = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+exceptions = []                  # shipped EMPTY (D23: nothing is assumed); replace this line by one [[data.fomc.exceptions]] table per excepted year
+
+[data.synthetic]                 # SyntheticProvider (5.10); SYNTHETIC fidelity, tests and smoke runs ONLY
+mode = "offline"                 # "offline" (seeded path generator, no input files) | "d20" (Black-76 from real raw daily closes + the iv_proxy index + the 13-week bill)
+base_vol = 0.16                  # offline: long-run annualised vol of the generated path
+vol_mean_revert = 0.03           # offline: daily mean reversion of log-vol
+vol_of_vol = 0.06                # offline: daily st.dev. of log-vol shocks
+cross_corr = 0.85                # offline: correlation of the underlyings' return shocks (one common factor)
+implied_premium = 0.10           # offline: the synthetic vol index = 100 * realised-vol state * (1 + this)
+planted_drift_bp = 0             # offline: momentum drift per session, in bp, signed by the lagged MA(20)-vs-MA(50) state; 0 = NO skill. Tests set 12
+term_slope = 0.05                # both modes: sigma(E) = v * clip(1 + term_slope * ln(dte_E / 30), 0.5, 1.5); flat in strike (no skew)
+spread_pct = 0.04                # both modes: full spread = max(1 tick, spread_pct * mid), symmetric around the mid, integer cents
+strike_step_pct = 0.005          # strike grid step = this share of the FIRST session's spot, snapped to {0.5, 1, 2.5, 5, 10} dollars, fixed for the run
+quote_size = 100                 # constant bid_size / ask_size
+open_interest = 1000             # constant oi_prev
+rate_bp = 400                    # offline: constant 13-week bill rate
+[data.synthetic.start_price_usd]
+SPY = 450
+QQQ = 380
+IWM = 200
+
+[recorder]
+strike_window_pct = 0.20         # record strikes within +-20% of spot
+max_dte = 75
+slots = ["dec", "exec", "eod"]
+
+[evidence]                       # D12
+tier_a_max_log_delay_s = 600     # a decision must be ledgered within this of its as_of to count as Tier A
+prereg_file = "prereg/prereg.v1.toml"
+
+[eval]
+bootstrap_reps = 5000
+bootstrap_block = 0              # 0 => max(5, 2 * longest horizon in the statistic, ceil(n ** (1/3)))
+ece_bins = 10
+ece_min_per_bin = 20
+base_rate_min_events = 250       # below this the expanding base rate is UNAVAILABLE (never a noisy early estimate); counted over reference history + own resolved events
+recal_min_events = 250           # below this the recalibrated implied reference is UNAVAILABLE (there is NO fallback to raw implied on the verdict path, 12.1)
+recal_refit_sessions = 21
+random_baseline_seeds = 1000
+placebo_min_distance_sessions = 60
+ci_level = 0.95
+null_sim_reps = 2000             # `eval power`: simulated experiments per null forecaster for the empirical SIZE of the pre-registered test (12.3)
+weekday_tail_ratio_max = 1.6     # `eval power` QC: max / min weekday frequency of the *_1em_1s tail events on the mirror above this => flag EM_WEEKDAY_BIAS,
+                                 # and `eval prereg register` refuses (the 1-session threshold rule of 5.3 would be miscalibrated)
+
+[paper]
+heartbeat_s = 15
+deadman_stale_s = 600
+alert_cmd = ""                   # optional command; receives a fixed short non-secret message as argv[1]
+shadow_replay = true             # run paper/shadow.py post-close
+wind_down = false                # true = model-change / shutdown mode (12.9): entries halted (halt reason "wind_down"), NO manage requests (positions are managed
+                                 # code-only to their hard exits); the forecast-only step 6a keeps running; the service exits 0 once book and broker are flat

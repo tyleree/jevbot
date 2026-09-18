@@ -874,8 +874,14 @@ class LedgerEntry(Struct):
     session: date
     as_of: datetime                        # simulated time in backtest, broker clock in paper
     payload: dict[str, Any]                # builtins only: int/str/bool/None/list/dict. NO floats (probabilities as ppm, prices as cents)
-    prev_hash: str                         # "0"*64 for seq 1
+    prev_hash: str                         # "0"*64 for seq 1 (canon.GENESIS_HASH)
     hash: str                              # sha256(prev_hash + "\n" + canon.dumps_sorted({"seq","kind","session","as_of","payload"}))
+                                           # = canon.ledger_entry_hash(prev_hash, seq, kind, session, as_of, payload) - THE formula, single-sourced (3.7):
+                                           # kind is the LedgerKind VALUE; session is spelt canon.render_session (ISO date, "2024-05-17"); as_of is
+                                           # canon.render_as_of (RFC 3339 UTC with "Z", six sub-second digits only when non-zero: "2024-05-17T20:00:00Z",
+                                           # exactly as msgspec renders a payload datetime); payload after the canonical round trip (tuples as arrays,
+                                           # str-enums by value). Every Ledger implementation appends AND verifies through that one function over the
+                                           # texts it persists (13.4), so SqliteLedger and the MemoryLedger double give the same head hash (INV-24).
 # run_id, trial_id, wall-clock time, request ids, token counts and latency are NEVER part of hashed material (INV-24);
 # they live in the run store's `meta` and `sidecar` tables.
 
@@ -979,11 +985,13 @@ class NewsItem(Struct):
     symbols: tuple[str, ...]
 
 class MaskTerms(Struct):                   # the parsed config/mask_terms.toml (5.8); a StateBuilder constructor argument that cycle / runner / probes must build
-    version: str                           # sha256(RULES_VERSION + file bytes)[:12] = mask_version
-    groups: dict[str, tuple[str, ...]]     # group name ("funds", "indices", "central_banks", "agencies", "releases", "people", "companies", "geo_events") -> terms
-    replacements: dict[str, str]           # group name -> replacement phrase
+    version: str                           # sha256(RULES_VERSION + file bytes)[:12] = mask_version; RULES_VERSION IS config.MASK_RULES_VERSION ("textmask.v1"):
+                                           # the ONE constant, bumped whenever a sanitiser / masking rule of 5.8 changes (textmask.py defines no second one)
+    groups: dict[str, tuple[str, ...]]     # group name ("funds", "indices", "central_banks", "agencies", "releases", "people", "companies", "geo_events") -> terms;
+                                           # always ALL eight keys of config.MASK_GROUPS (an omitted group is ())
+    replacements: dict[str, str]           # group name -> replacement phrase; always all eight (the 5.8 defaults unless the file overrides one)
 
-def load_mask_terms(path: Path) -> MaskTerms     # config.py (WP00): msgspec.toml decode + validation; ConfigError on unknown groups / empty terms
+def load_mask_terms(path: Path) -> MaskTerms     # config.py (WP00): msgspec.toml decode + validation; ConfigError on unknown groups / empty terms (file format: 5.8)
 ```
 
 ### 2.8 Run metadata
@@ -1141,7 +1149,10 @@ sections and asserts that the ids, labels and backticked paths found there equal
 ## 3. Interfaces (`src/jevbot/protocols.py`)
 
 All are `typing.Protocol` (structural). `@runtime_checkable` on `Decider`, `Broker`, `ChainProvider` (used by `doctor` and the
-wave-1 contract test). No Protocol method takes or returns a vendor SDK type.
+wave-1 contract test). No Protocol method takes or returns a vendor SDK type. **Data members are declared as read-only `@property`
+members** (`MarketView.as_of`, `Decider.name`, `BookP.last_key`, ...): no consumer ever assigns to them, and a settable-attribute
+declaration would make mypy reject every frozen `Struct` / frozen dataclass / `@property` implementation ("expected settable variable,
+got read-only attribute"). An implementation may satisfy them with a plain instance or class attribute, a frozen field or a property.
 
 ### 3.1 Time
 
@@ -1174,8 +1185,10 @@ cross-checked against XNYS at boot: **the earlier close wins** and an alert is r
 ```python
 @runtime_checkable
 class ChainProvider(Protocol):
-    fidelity: Fidelity
-    source: str
+    @property
+    def fidelity(self) -> Fidelity: ...
+    @property
+    def source(self) -> str: ...
     def underlyings(self) -> tuple[str, ...]: ...
     def keys(self, underlying: str, start: date, end: date) -> list[SnapshotKey]: ...   # ordered; snapshots that exist
     def get_chain(self, underlying: str, key: SnapshotKey) -> ChainSnapshot | None: ... # ENRICHED (own iv/delta/fwd, spot); no PIT logic here
@@ -1204,26 +1217,42 @@ class DailyBarsSource(Protocol):
 class MarketView(Protocol):
     """The read surface of DataView. Every consumer (features, state, candidates, risk, outcomes, cycle, SimBroker, fills)
     is typed against MarketView so it can be unit-tested with tests/fixtures/fake_view.py."""
-    as_of: datetime
-    key: SnapshotKey
-    session: date
-    calendar: Calendar
-    fidelity: Fidelity
+    @property
+    def as_of(self) -> datetime: ...
+    @property
+    def key(self) -> SnapshotKey: ...
+    @property
+    def session(self) -> date: ...
+    @property
+    def calendar(self) -> Calendar: ...
+    @property
+    def fidelity(self) -> Fidelity: ...
+    # FRAME CONVENTIONS (the double and DataView agree on them; consumers rely on them): every `session` column / index is
+    # datetime64[ns] (like the chain's `expiry` / `last_session`); a MISSING table (`daily`, `bars`, `volidx:<NAME>`, `rates`) raises
+    # DataUnavailable, an existing table with no knowable rows returns an empty frame / Series.
     def chain(self, underlying: str) -> ChainSnapshot: ...            # DataUnavailable if none; PitViolation if knowable_at > as_of
     def spot(self, underlying: str) -> Cents: ...                     # chain(underlying).spot  (the decision-time reference price `ref`)
     def closes(self, underlying: str, n: int) -> pd.Series: ...       # close_c of the last n COMPLETED sessions (< session), oldest first, int cents:
-                                                                      # exactly ONE value per session (close_c lives on the session's `eod` row only, 5.4)
-    def close(self, underlying: str, session: date) -> Cents: ...     # keyed read of that session's close_c; PitViolation if its close_knowable_at > as_of
-    def bars(self, underlying: str, n: int) -> pd.DataFrame: ...      # last n COMPLETED sessions: open, high, low, close (floats). WITHIN-BAR RATIOS ONLY (5.3)
+                                                                      # exactly ONE value per session (close_c lives on the session's `eod` row only, 5.4).
+                                                                      # An int64 Series named "close_c" indexed by session (DatetimeIndex "session")
+    def close(self, underlying: str, session: date) -> Cents: ...     # keyed read of that session's close_c; PitViolation if its close_knowable_at > as_of;
+                                                                      # DataUnavailable when the eod row exists but carries no recorded close yet (or has no row)
+    def bars(self, underlying: str, n: int) -> pd.DataFrame: ...      # last n COMPLETED sessions: columns session, open, high, low, close (float64), oldest first.
+                                                                      # WITHIN-BAR RATIOS ONLY (5.3)
     def today_open_ratio(self, underlying: str) -> float | None: ...  # open(today) / file_close(prev session); today's OPEN column is knowable at open + 60 s
                                                                       # while today's high / low / close / volume stay null until the next open (column gating, below)
     def daily(self, underlying: str, n: int) -> pd.DataFrame: ...     # derived daily series (13.2): exactly ONE ROW PER SESSION - for each of the last n-1 past
                                                                       # sessions the row of the DESIGNATED SLOT (the slot equal to this view's key.slot, else that
                                                                       # session's `eod` row), then this snapshot's own row last. Every look-back window in 5.3 is
-                                                                      # therefore indexed by SESSION, in every mode, whether the archive holds 1 or 3 slots per session
-    def vol_index(self, name: str, n: int) -> pd.Series: ...          # last n closes with knowable_at <= as_of (newest is normally session-1, D22)
+                                                                      # therefore indexed by SESSION, in every mode, whether the archive holds 1 or 3 slots per session.
+                                                                      # The 13.2 columns; `close_c` is nulled where `close_knowable_at` is null or > as_of (column gating)
+    def vol_index(self, name: str, n: int) -> pd.Series: ...          # last n closes with knowable_at <= as_of (newest is normally session-1, D22);
+                                                                      # a float64 Series indexed by session
     def rate(self) -> float: ...                                      # 13-week bill coupon-equivalent, decimal; last knowable
     def events(self, start: date, end: date, underlying: str | None = None) -> tuple[ScheduledEvent, ...]: ...
+        # knowable (knowable_at <= as_of), scheduled, non-cancelled rows with start <= event_date <= end. underlying=None serves EVERY such row;
+        # underlying=U serves the market-wide rows (underlying None: fomc_decision / cpi / nfp) PLUS U's own rows (ex_dividend) - never another
+        # underlying's. The entry state's events block, risk check 11 and the ex-dividend entry block all read it with underlying=U.
     def event_coverage(self) -> tuple[str, ...]: ...
     def news(self, underlying: str, lookback_hours: int) -> tuple[NewsItem, ...]: ...
     def news_covered(self, underlying: str) -> bool: ...
@@ -1270,8 +1299,10 @@ receive only a `MarketView`. Tables and their gating (the only per-column rules 
 ```python
 @runtime_checkable
 class Decider(Protocol):
-    name: str                 # "live_jev" | "replay_jev" | "mock_jev" | "baseline:<...>"
-    model: str                # "jev-1.13.0" | "mock-1" | "baseline"
+    @property
+    def name(self) -> str: ...                # "live_jev" | "replay_jev" | "mock_jev" | "baseline:<...>"
+    @property
+    def model(self) -> str: ...               # "jev-1.13.0" | "mock-1" | "baseline"
     # (There is NO needs_state switch: states are ALWAYS built. DecisionRequest.state / state_hash, EntryFacts for the cross-checks and the
     #  expected-move integers of the forecasts all come from the BuiltState, for every decider including the random and always-enter baselines.)
     def decide(self, req: DecisionRequest) -> DecisionResult: ...
@@ -1303,7 +1334,8 @@ class DecisionCache(Protocol):
     def manifest_hash(self, namespace: str) -> str: ...  # sha256 over "key:sha256(answer_json)\n" for all rows of the namespace ORDER BY key
 
 class SpendLedger(Protocol):                             # jev/spend.py, backed by $JEVBOT_DATA/state/spend.sqlite (shared by EVERY entry point)
-    scope: str                                                            # "paper" (the paper service) | "batch" (backtests, probes, leakage, baselines). One guard
+    @property
+    def scope(self) -> str: ...                                           # "paper" (the paper service) | "batch" (backtests, probes, leakage, baselines). One guard
                                                                           # instance is bound to one scope; counters and the sticky block are PER SCOPE, so a
                                                                           # backtest that hits its ceiling can never halt the paper service's entries.
     def reserve(self, run_id: str, tokens: int) -> int: ...               # returns a reservation id; SpendLimitError when the run total (batch scope only) or the
@@ -1319,7 +1351,8 @@ class SpendLedger(Protocol):                             # jev/spend.py, backed 
 ```python
 @runtime_checkable
 class Broker(Protocol):
-    name: str                                                         # "sim" | "alpaca_paper" | "fake"
+    @property
+    def name(self) -> str: ...                                        # "sim" | "alpaca_paper" | "fake"
     def account(self) -> AccountSnapshot: ...
     def positions(self) -> tuple[BrokerPosition, ...]: ...            # leg level, exactly as the broker reports, INCLUDING equity
     def open_orders(self) -> tuple[OrderState, ...]: ...
@@ -1376,21 +1409,28 @@ class KillSwitch(Protocol):
     def rearm(self, rearm_file_text: str, *, reset_peak: bool, note: str) -> None: ...
 
 class Ledger(Protocol):
+    # every implementation computes LedgerEntry.hash with canon.ledger_entry_hash (THE 2.7 formula incl. the frozen spelling of the session /
+    # as_of columns) on append AND in verify() over the persisted texts (13.4), so SqliteLedger and the MemoryLedger double give the same head
+    # hash for the same entries (INV-19, INV-24). A payload with a float / datetime / non-string key is a TypeError BEFORE anything is appended.
     def append(self, kind: LedgerKind, session: date, as_of: datetime, payload: Mapping[str, Any],
                *, sidecar: Mapping[str, Any] | None = None) -> LedgerEntry: ...
     def commit(self) -> None: ...                        # backtest: once per session; paper: after every append (synchronous=FULL)
-    def rollback(self) -> None: ...                      # per-session mode: drop the uncommitted session (abort paths of run_backtest, 10.1); no-op in per-append mode
+    def rollback(self) -> None: ...                      # per-session mode: drop the uncommitted session (abort paths of run_backtest, 10.1) - the entries AND the
+                                                         # fill claims, states and meta written since the last commit (one SQLite transaction); no-op in per-append mode
     def head(self) -> tuple[int, str]: ...               # (seq, hash); (0, "0"*64) when empty
-    def entries(self, kind: LedgerKind | None = None, since_seq: int = 0) -> Iterator[LedgerEntry]: ...
+    def entries(self, kind: LedgerKind | None = None, since_seq: int = 0) -> Iterator[LedgerEntry]: ...   # entries with seq > since_seq, ascending
     def verify(self, from_seq: int = 1) -> None: ...     # recompute the chain; raises LedgerCorrupt
     def claim_fill(self, fill_id: str) -> bool: ...      # INSERT into the UNIQUE `fill_ids` table; False = already booked (the dedupe of the ONE fill path)
     def put_state(self, state_hash: str, state_json: str, *, session: date, underlying: str, request_kind: str, variant: str) -> None: ...
-        # unhashed `states` + `state_index` tables (13.4): every built state of the run, indexed by (session, underlying, request_kind, variant)
+        # unhashed `states` + `state_index` tables (13.4): every built state of the run, indexed by (session, underlying, request_kind, variant).
+        # The same (session, underlying, request_kind, variant) with the SAME state_hash is an idempotent no-op (the 10.1 restart case); with a
+        # DIFFERENT state_hash it raises InvariantError (a rebuilt state must be byte-identical: a determinism bug, never silently overwritten)
     def get_states(self, request_kind: str, variant: str = "base") -> Iterator[tuple[date, str, str]]: ...
         # (session, underlying, state_json), ordered by (session, underlying). THE source of baseline 6's recorded states (12.4) and of the
         # probe suites' `run:RUN_ID` state source (6.8)
     def get_meta(self, key: str) -> str | None: ...
-    def set_meta(self, key: str, value: str) -> None: ...                        # write-once keys; raises if the key exists with a different value
+    def set_meta(self, key: str, value: str) -> None: ...                        # write-once keys: the same value again is a no-op; a DIFFERENT value for an
+                                                                                 # existing key raises InvariantError
 ```
 
 ### 3.5 Paper-only seams
@@ -1415,7 +1455,8 @@ describe behaviour; **these** are the contract).
 
 ```python
 class BookP(Protocol):                                   # implemented by portfolio.Book (10.8)
-    last_key: SnapshotKey | None
+    @property
+    def last_key(self) -> SnapshotKey | None: ...        # the last snapshot key folded in (None before the first SESSION_START); resume starts after it (10.1)
     def apply(self, entry: LedgerEntry) -> None: ...
     def state(self) -> PortfolioState: ...
     def intent(self, intent_id: str) -> OrderIntent: ...
@@ -1432,7 +1473,8 @@ class StateBuilderP(Protocol):                           # implemented by state.
     def variant(self, state: dict[str, Any], v: Variant) -> dict[str, Any]: ...
 
 class DecisionRulesP(Protocol):                          # implemented by rules.DecisionRules (section 7)
-    rules_hash: str
+    @property
+    def rules_hash(self) -> str: ...                     # the section-4 `rules_hash` of the [rules] section this instance was built from
     def decide_entry(self, underlying: str, decision_id: str, core: DecisionResult, text: DecisionResult | None, facts: EntryFacts) -> EntryDecision: ...
     def confirm_entry(self, base: EntryDecision, core_variants: Mapping[Variant, DecisionResult | DeciderError],
                       text: DecisionResult | None, facts: EntryFacts) -> EntryDecision: ...
@@ -1461,18 +1503,34 @@ class CycleContext:
 # canon.py
 def dumps_ordered(obj: object) -> str      # json.dumps(obj, ensure_ascii=False, allow_nan=False, separators=(",", ":"))  - insertion order KEPT (Jev-facing)
 def dumps_sorted(obj: object) -> str       # same + sort_keys=True  (ledger, config, manifests, ids). Both reject float/Decimal/datetime/bytes/numpy via a pre-walk.
-def sha256_hex(s: str | bytes) -> str
-def ensure_state_safe(obj: object, *, masked: bool = True, underlyings: Sequence[str] = ()) -> None      # 5.9
+def sha256_hex(s: str | bytes) -> str      # a str is hashed as its UTF-8 bytes
+def ensure_state_safe(obj: object, *, masked: bool = True, underlyings: Sequence[str] = (), max_chars: int | None = None) -> None      # 5.9;
+    # max_chars given => StateTooLarge when len(dumps_ordered(obj)) > max_chars (state.py passes state.hard_max_chars; canon.py may not import config)
 def cache_key(model: str, state: dict, question_set_hash: str, question: dict) -> str
     # D8, literally: sha256_hex(dumps_ordered({"v": 1, "model": model, "state": state, "question_set_hash": question_set_hash, "question": question}))
+GENESIS_HASH = "0" * 64                    # prev_hash of seq 1; Ledger.head() of an empty store is (0, GENESIS_HASH)
+def render_session(session: date) -> str   # the persisted `session` text: the ISO date ("2024-05-17"); a datetime is refused
+def render_as_of(as_of: datetime) -> str   # the persisted `as_of` text: RFC 3339 UTC with "Z", six sub-second digits only when non-zero
+                                           # ("2024-05-17T20:00:00Z", "2024-05-20T20:05:00.250000Z"), any tz-aware instant normalised to UTC first -
+                                           # byte for byte what msgspec renders for a payload datetime; a naive datetime is a ValueError
+def ledger_entry_hash(prev_hash: str, seq: int, kind: str, session: date | str, as_of: datetime | str, payload: Mapping[str, Any] | str) -> str
+    # THE 2.7 formula: sha256_hex(prev_hash + "\n" + dumps_sorted({"seq": seq, "kind": kind, "session": render_session, "as_of": render_as_of, "payload": payload})).
+    # kind = the LedgerKind value (a member is accepted); session / as_of are rendered here or taken as the already-persisted texts; payload is the
+    # mapping (canonical round trip) or its persisted dumps_sorted text. Every Ledger implementation appends AND verifies through it (INV-19, INV-24).
+    # Structure.structure_id = sha256_hex(dumps_sorted([kind, ["<occ>:<side>", ...]]))[:16] (types.py spells the same formula inline; test_canon pins equality).
 
 # money.py
 def cdiv(a: int, b: int) -> int                                       # ceiling division for non-negative a, positive b
 def tick_cents(underlying: str, px_cents: int, penny_all: Sequence[str]) -> int     # 1 if penny class; else 5 below 300, 10 at/above 300
 def round_net(net_cents: int, tick: int, *, aggressive: bool) -> int
     # passive (default, entries and discretionary exits): never pay more / accept less than computed: debit rounds DOWN in magnitude, credit UP in magnitude
-    # aggressive (mandatory exits only): the inverse. 0 is illegal -> +/- 1 tick. Result always has <= 2 decimals when divided by 100.
-def assert_limit_sign(purpose: OrderPurpose, kind: StructureKind | None, limit: int, *, width: Cents, pad: Cents) -> None
+    # (the signed value is floored). aggressive (mandatory exits only): the inverse (the signed value is ceiled). Result always has <= 2 decimals when divided by 100.
+    # 0 is illegal: passive keeps the sign of a non-zero net (a sub-tick debit -> +tick, a sub-tick credit -> -tick, exactly 0 -> -tick); aggressive is
+    # always >= net (a sub-tick credit and 0 -> +tick, crossing zero so a mandatory multi-leg close stays marketable). Hence passive <= aggressive and
+    # net <= aggressive for every input. SINGLE-LEG closes take their sign from the leg's side, not from this function: a zero-bid LONG leg has a
+    # natural net of 0 and its mandatory close must be given limit = -tick (sell at one tick) by the caller (risk.py / order workers / killswitch) -
+    # round_net(0, tick, aggressive=True) = +tick would fail assert_limit_sign(CLOSE, LONG_*, +tick).
+def assert_limit_sign(purpose: OrderPurpose, kind: StructureKind | None, limit: int | None, *, width: Cents, pad: Cents) -> None
     # OPEN credit structure: limit < 0; OPEN debit structure (incl. single legs): limit > 0.
     # CLOSE / KILL of a MULTI-LEG structure: the opposite sign is EXPECTED but a close may legitimately cross zero, so closes assert only
     #   |limit| <= width + pad, where width = Structure.width (max wing) and pad = the largest cushion a mandatory / kill close may ever carry:
@@ -1487,8 +1545,13 @@ def assert_limit_sign(purpose: OrderPurpose, kind: StructureKind | None, limit: 
 def max_loss_pc(kind: StructureKind, widths: tuple[Cents, Cents], net: int, fee_rt: Cents) -> Cents          # net = signed cents/share at the band in question
 def max_profit_pc(kind: StructureKind, widths: tuple[Cents, Cents], net: int) -> Cents | None                 # None = unbounded (long call); long put reported as None
 def breakevens(kind: StructureKind, legs: Sequence[Leg], net: int) -> tuple[Cents, ...]                       # underlying price levels
-def bp_required_pc(kind: StructureKind, widths: tuple[Cents, Cents], net: int, fee_rt: Cents, cfg: RiskConfig) -> Cents   # uses cfg.bp_haircut_mult, cfg.condor_bp_mode; ceil
-def fee_round_trip(n_legs: int, n_sell_legs_open: int, open_leg_prices: Sequence[Cents], fees: FeesConfig) -> Cents   # fee_rt of 9.2 / 10.7, ceil to the cent
+def bp_required_pc(kind: StructureKind, widths: tuple[Cents, Cents], net: int, fee_rt: Cents, cfg: RiskConfig) -> Cents   # uses cfg.bp_haircut_mult, cfg.condor_bp_mode; ceil;
+    # clamped at >= 0. fee_rt is validated (int >= 0) and NOT added: the 9.2 BP column carries no fee term (the broker reserves no fees; BP is
+    # cross-checked against broker_options_bp and calibrated by probe P-ALP-5). Only max_loss_pc adds fee_rt.
+def fee_round_trip(n_legs: int, n_sell_legs_open: int, open_leg_prices: Sequence[Cents], fees: FeesConfig) -> Cents   # fee_rt of 9.2 / 10.7, ceil to the cent;
+    # open_leg_prices holds the headline price of EVERY leg (any order). Over a round trip every leg is sold exactly once, so the total does not depend on
+    # which legs open short; the SEC fee is rounded up PER LEG (an upper bound of any open / close split, excess < n_legs micro-dollars), so fee_rt is
+    # never below the sum of the two 10.7 per-fill fees.
 def defined_risk_ok(kind: StructureKind, legs: Sequence[Leg]) -> bool                                         # the leg-pairing rule of 9.1 check 5 (credit AND debit kinds)
 def leg_liquidity_rejects(quote: Quote, *, sold: bool, cfg: LiquidityConfig) -> tuple[str, ...]              # liq:bid | liq:crossed | liq:spread | liq:oi ; () = eligible
 
@@ -1533,8 +1596,14 @@ def implied_prob_above(chain: ChainSnapshot, strike_c: int, resolve_ts: datetime
 ---
 ## 4. Config schema (`config/default.toml`, structs in `config.py`)
 
-`load_config(path: Path | None, overrides: Sequence[str] = ()) -> Config` uses `msgspec.toml.decode(..., type=Config)` with
-`forbid_unknown_fields=True` (a typo is a startup error). Merge order: `default.toml` <- `--config file` <- CLI `-o section.key=value`.
+`load_config(path: Path | Sequence[Path] | None, overrides: Sequence[str] = (), *, flags: Sequence[str] = ()) -> Config` decodes each TOML file
+untyped (`msgspec.toml.decode`), deep-merges them and the overrides, then `msgspec.convert(merged, type=Config)` with
+`forbid_unknown_fields=True` (a typo is a startup error). It is not a typed `msgspec.toml.decode(..., type=Config)`: that would refuse the quoted
+ISO dates of the block below (`start = "2012-01-03"` -> "Expected date, got str"); the untyped decode + `convert` accepts quoted and native TOML
+dates alike. Merge order: `default.toml` <- `--config file` (repeatable, in order) <- CLI `-o section.key=value`. `flags` are the run's flags:
+the two flag-dependent validation rules below (`ledger_forecasts = false`, `purpose = "shadow"`) need them, so a baseline-4 / shadow config is
+loaded with `load_config(..., flags=run_flags)` or validated with `config.validate(cfg, flags=run_flags)`; `resolve()` re-validates with the
+flags unknown (`flags=None`) and skips only those two rules.
 There are **no environment-variable config overrides**. In paper mode `-o` is refused (`ConfigError`) for every section named in the one
 constant `config.PROTECTED_SECTIONS_PAPER = ("risk", "kill", "health", "orders", "dte", "exits")` - the single definition that 0.4 and the
 CLI (section 14) refer to: the service's limits come from files under version control only.
@@ -1558,10 +1627,17 @@ def probe_status(data_dir: Path, *, model: str, sdk_version: str, entry_qset_has
     # reads $JEVBOT_DATA/probes/step0/records/*.json; a record counts ONLY if all four key fields match exactly (a Step 0 taken on another
     # model id, SDK version or question wording never satisfies this namespace - B3.5: re-run on any model change)
 class ResolvedConfig(Struct):
-    cfg: Config                            # decider.kind and news.enabled replaced by their concrete values
+    cfg: Config                            # decider.kind and news.enabled replaced by their concrete values (paper also forces run.purpose = "paper", jev.cache.mode = "record")
     news_resolved: bool; news_reason: str
     config_hash: str; state_config_hash: str; rules_hash: str; risk_config_hash: str; candidate_config_hash: str
-def resolve(cfg: Config, secrets: Secrets, probes: ProbeStatus) -> ResolvedConfig      # pure; ConfigError on a refused combination
+def resolve(cfg: Config, secrets: Secrets, probes: ProbeStatus, *, mask_version: str, bucket_spec_hash: str) -> ResolvedConfig
+    # pure (no IO); BOTH keyword arguments are REQUIRED - MaskTerms.version (load_mask_terms, 5.8) and buckets.bucket_spec_hash (5.5) - because they are
+    # inputs of state_config_hash and resolve() cannot read a file or import buckets.py itself; ConfigError on a blank value or a refused combination.
+    # resolve(cfg, secrets, probes) alone is a TypeError. Every entry point calls
+    #   rc = config.resolve(cfg, secrets, config.probe_status(...), mask_version=mask_terms.version, bucket_spec_hash=buckets.bucket_spec_hash)
+def state_config_hash(cfg: Config, *, mask_version: str, bucket_spec_hash: str) -> str    # same two required keywords; the other sub-hashes take cfg only
+class Secrets(Struct): typesafe_api_key: str | None; alpaca_paper_key: str | None; alpaca_paper_secret: str | None; data_dir: str | None
+    # every field None when absent / blank; values are registered for redaction and never appear in repr / str
 ```
 - `decider.kind = "auto"`: `mock` when `TYPESAFE_API_KEY` is absent (D7); else `live` in paper and per `jev.cache.mode` in backtests.
 - `news.enabled`: `"off"` => off (`explicit_off`). `"on"` => on (`explicit_on`), **except** paper mode with the live decider and
@@ -1952,10 +2028,14 @@ the presence of any of `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `APCA_API_KEY_ID`,
 set in the environment are a `ConfigError` (the pinned model and default URL are passed explicitly); every loaded secret value is
 registered with the log redaction filter (`logsetup.py`).
 
-`logsetup.configure(level)`: JSON-lines handler to `logs/jevbot-<date>.jsonl`; redaction filter on the root logger;
-`logging.getLogger(name).setLevel(max(WARNING, ...))` for `typesafe_sdk`, `httpx2`, `httpcore`, `urllib3`, `requests`, `alpaca`
-**after** those packages are imported - so an application log level of DEBUG can never surface request or response bodies
-(the SDK redacts only headers). `tests/guards/test_no_bodies_logged.py` (WP03) drives `LiveJev` through the mock transport at app
+`logsetup.configure(level, *, log_dir=None)`: redaction filter on the root logger (plus a redacting LogRecord factory and redacting
+formatters, so `msg % args`, `extra=` fields and tracebacks are covered); with `log_dir` a JSON-lines handler to `<log_dir>/jevbot-<UTC date>.jsonl`;
+`logging.getLogger(name).setLevel(max(WARNING, ...))` for `typesafe_sdk`, `httpx2`, `httpcore2` (the HTTP core the pinned SDK wheel
+really logs under; plain `httpcore` / `httpx` are pinned too), `urllib3`, `requests`, `alpaca` **after** those packages are imported
+(`logsetup.pin_third_party_loggers()` again after a lazy import) - so an application log level of DEBUG can never surface request or
+response bodies (the SDK redacts only headers). The data directory is unknown when the process starts (`paths.data_dir` / `$JEVBOT_DATA`
+arrive through the config and the secrets), so the CLI root configures the console at start and `GlobalOptions.load()` (`cli/main.py`,
+section 14) attaches the file handler under `<data_dir>/logs/` the moment the data directory is resolved. `tests/guards/test_no_bodies_logged.py` (WP03) drives `LiveJev` through the mock transport at app
 level DEBUG and asserts no state fragment, answer JSON or secret appears in any record; the full-cycle variant
 (`tests/integration/test_no_bodies_logged_cycle.py`, WP13) repeats the assertion over a whole mini-backtest cycle incl. position detail.
 
@@ -2447,6 +2527,16 @@ blocks entries for that underlying this cycle (`reason = "news_pipeline_error"`)
    pending-event question's list.
 
 `mask_version = sha256(RULES_VERSION + mask_terms file bytes)[:12]` goes into every provenance sidecar and into `state_config_hash`.
+`RULES_VERSION` is the **one** constant `config.MASK_RULES_VERSION` (`"textmask.v1"`; it lives in `config.py` because `load_mask_terms`
+computes the version there and WP00 cannot import a wave-1 module): `textmask.py` defines no second version string and **bumps that constant**
+whenever a sanitiser or masking rule above changes. `config.load_mask_terms(path).version` is the only `mask_version`.
+
+**File format of `config/mask_terms.toml`** (what `load_mask_terms` accepts): one entry per group of `config.MASK_GROUPS` (`funds`, `indices`,
+`central_banks`, `agencies`, `releases`, `people`, `companies`, `geo_events`), in either of two shapes - a table `[funds]` with `terms = [..]`
+(required, non-empty) and an optional `replacement = ".."`, or a top-level array `funds = [..]` (before the first table). Unknown groups, unknown
+keys inside a table, empty or blank terms, a term listed twice (case-insensitively, within or across groups) and a file without any group are
+`ConfigError`. `MaskTerms.groups` and `.replacements` always carry all eight keys: an omitted group is `()`, and a replacement phrase not given in
+the file is the 5.8 default above (the generic patterns of 4a use the same phrases).
 Masking is lossy by design and a mitigation, not a cure (B7.1, G9): `eval leakage masked` and `news on/off` measure what it costs.
 The structural defence is the request split plus 7.4 / 7.7: text can only veto, re-rank, or - **only together with code-side
 market-data confirmation** - close. Unconfirmed adverse text never places an order of any kind (INV-16).
@@ -3516,7 +3606,8 @@ All three bands are recorded in every mode (D13).
 def run_backtest(cfg: Config, *, decider: Decider, provider: ChainProvider, cache: DecisionCache | None = None,
                  resume: str | None = None, flags: Sequence[str] = (), run_dir: Path | None = None,
                  tier_of: Callable[[str, date], EvidenceTier] | None = None) -> RunMeta:
-    rc      = config.resolve(cfg, secrets, config.probe_status(...))      # decider / news resolved ONCE; sub-hashes (section 4)
+    rc      = config.resolve(cfg, secrets, config.probe_status(...),      # decider / news resolved ONCE; sub-hashes (section 4)
+                             mask_version=mask_terms.version, bucket_spec_hash=buckets.bucket_spec_hash)   # both REQUIRED (state_config_hash scope)
     dmh     = store.selected_manifest_hash(provider, cfg.universe.underlyings, cfg.run.start - LOOKBACK, cfg.run.end, TABLES)
               # data_manifest_hash, computed UP FRONT from the partitions SELECTED by (provider, underlyings, [start - look-back, end], tables) - 13.1.
               # It is in the hashed RUN_START payload, which is written before any DataView exists, so it cannot be "what the views opened".
@@ -4601,6 +4692,23 @@ CREATE TABLE spend_block (utc_day TEXT NOT NULL, scope TEXT NOT NULL, reason TEX
 package at the end. Global options on every command: `--config PATH` (repeatable, merged in order), `-o section.key=value` (repeatable;
 refused in paper mode for the sections of `config.PROTECTED_SECTIONS_PAPER`, section 4), `--data-dir PATH`, `--log-level info|warning|error|debug` (debug never surfaces SDK bodies, INV-18),
 `--json`. Every command that can touch the broker prints the PAPER-ONLY banner first. Exit codes per 2.9.
+
+**Sub-app contract** (fixed by the root, `cli/main.py`; every `cli/*_cmds.py` and `cli/doctor.py` follows it):
+- a sub-app module exposes the module attribute `app`, a `typer.Typer` (`jev_cmds` also exposes `cache_app` for the `cache` area; `doctor.py`
+  exposes `app` with its single command); `SUBAPPS` entries may name the attribute as `"package.module:attribute"`. An extender exposes
+  `register(sub_app: typer.Typer) -> None` (`leakage_cmds.register(eval_app)` adds `eval leakage`). Sub-app modules never import another
+  work package at module level (section 16: lazy imports inside the command function).
+- the global options are parsed by the root: they are accepted before the area name and anywhere after it (`jevbot paper run --config
+  config/paper.toml`, `jevbot cache stats --json`). A command reads them with `jevbot.cli.main.get_globals(ctx)` and boots with ONE call,
+  `loaded = get_globals(ctx).load()` -> `LoadedConfig(cfg, secrets, data_dir)`: the merged configuration, `config.load_secrets` (INV-02 /
+  INV-18), the resolved data directory (`config.data_dir` -> `ensure_data_dir`) and, at that moment, the JSON-lines log file
+  `<data_dir>/logs/jevbot-<date>.jsonl` (section 4). `get_globals(ctx).load_config()` returns the configuration alone. A command must NOT
+  declare `--config`, `-o`, `--data-dir`, `--log-level` or `--json` itself and never uses `-o` as a short flag. In a sub-app's own
+  `CliRunner` tests (invoked without the root) pass `obj=GlobalOptions(...)`.
+- the root prints the PAPER-ONLY banner (once per invocation, on stderr so `--json` stdout stays parseable) for the `paper` and `record`
+  areas; any other command that talks to Alpaca (`doctor --online`, `data fetch news|exdiv|bars`) calls `jevbot.cli.main.paper_only_banner(ctx)`.
+- a `JevbotError` escaping a command is printed as one redacted line and mapped with `errors.exit_code_for`; refusals (kill active, lock held,
+  `doctor --strict`) raise `typer.Exit(ExitCode.SAFETY_REFUSED)`; a missing sub-app module prints "not built yet" and exits 1.
 
 | command | arguments | what it does |
 |---|---|---|
