@@ -21,6 +21,7 @@ Today's high, low, close and volume are never read: `view.bars()` returns comple
 `view.today_open_ratio()` is the single use of today's bar row (its `open`, knowable at open + 60 s).
 """
 
+import itertools
 import json
 import math
 from collections.abc import Sequence
@@ -167,7 +168,7 @@ def pctile(x: float, hist: Sequence[float], *, min_len: int) -> int | None:
     if n < max(2, min_len):
         return None
     at_or_below = sum(1 for value in hist if value <= x)
-    return int(round(100.0 * (at_or_below - 1) / (n - 1)))
+    return round(100.0 * (at_or_below - 1) / (n - 1))
 
 
 def parse_atm_term(payload: object) -> tuple[AtmNode, ...]:
@@ -224,7 +225,7 @@ def total_variance_at(term: Sequence[AtmNode], tt: float) -> tuple[float, str] |
     last_tt, last_w = nodes[-1]
     if tt > last_tt:
         return last_w * tt / last_tt, _EXTRAPOLATED
-    for (tt_lo, w_lo), (tt_hi, w_hi) in zip(nodes, nodes[1:], strict=False):
+    for (tt_lo, w_lo), (tt_hi, w_hi) in itertools.pairwise(nodes):
         if tt_lo <= tt <= tt_hi:
             if tt_hi == tt_lo:
                 return w_lo, _INTERPOLATED
@@ -244,7 +245,7 @@ def expected_move(term: Sequence[AtmNode], tt: float) -> tuple[float, int, str] 
     if w < 0.0 or not math.isfinite(w):
         raise InvariantError(f"features: total variance must be finite and >= 0, got {w!r}")
     em = math.sqrt(w)
-    return em, max(1, int(round(TENTHS_PER_UNIT * em))), quality
+    return em, max(1, round(TENTHS_PER_UNIT * em)), quality
 
 
 # ======================================================================================================================
@@ -368,7 +369,7 @@ def _proxy_pct(frame: pd.DataFrame) -> int:
     window = frame["source"].tolist()[-YEAR_SESSIONS:]
     if not window:
         return 0
-    return int(round(100.0 * sum(1 for source in window if source == "proxy") / len(window)))
+    return round(100.0 * sum(1 for source in window if source == "proxy") / len(window))
 
 
 # ======================================================================================================================
