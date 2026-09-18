@@ -159,7 +159,7 @@ class PitTable:
     # --- introspection --------------------------------------------------------------------------------------------------
 
     def __len__(self) -> int:
-        return int(len(self._df))
+        return len(self._df)
 
     def __repr__(self) -> str:
         return f"PitTable({self.name!r}, rows={len(self._df)}, key={list(self.key)})"
@@ -245,7 +245,8 @@ class PitTable:
         stamp = self._df.at[position, ts_column if ts_column is not None else KNOWABLE_AT]
         if pd.isna(stamp):
             return None
-        return pd.Timestamp(stamp).to_pydatetime(warn=False)
+        out: datetime = pd.Timestamp(stamp).to_pydatetime(warn=False)
+        return out
 
     def has(self, key: object) -> bool:
         return self._normalise(key) in self._index
@@ -437,7 +438,9 @@ class TableEventSource:
 
 
 def _scheduled_events(frame: pd.DataFrame) -> list[ScheduledEvent]:
-    missing = [c for c in ("kind", "event_date", "scheduled", "knowable_at", "knowable_rule", "source_url", "fetched_at") if c not in frame.columns]
+    missing = [
+        c for c in ("kind", "event_date", "scheduled", "knowable_at", "knowable_rule", "source_url", "fetched_at") if c not in frame.columns
+    ]
     if missing:
         raise DataError(f"events frame is missing columns {missing}")
     out: list[ScheduledEvent] = []

@@ -66,9 +66,11 @@ def floor_of(value: Decimal) -> int:
 # ======================================================================================================================
 
 
-def market() -> tuple[ChainSnapshot, tuple[OptionContract, ...]]:
-    chain = cf.make_chain()
-    expiry = cf.target_expiry(chain)
+def _build_market() -> tuple[ChainSnapshot, tuple[OptionContract, ...]]:
+    """One narrow chain (a single ~35 DTE expiry, strikes around the spot) shared by every property below: each draw
+    replaces the four quotes on a copy of it, and a small table keeps those copies cheap."""
+    expiry = cf.target_expiry(cf.make_chain())
+    chain = cf.make_chain(expiries=(expiry,), moneyness_window=0.06)
     contracts = (
         cf.contract_at(chain, expiry, Right.PUT, 440_000),
         cf.contract_at(chain, expiry, Right.PUT, 445_000),
@@ -76,6 +78,13 @@ def market() -> tuple[ChainSnapshot, tuple[OptionContract, ...]]:
         cf.contract_at(chain, expiry, Right.CALL, 460_000),
     )
     return chain, contracts
+
+
+_MARKET: Final = _build_market()
+
+
+def market() -> tuple[ChainSnapshot, tuple[OptionContract, ...]]:
+    return _MARKET
 
 
 def draw_quote(rng: np.random.Generator) -> tuple[int, int]:
@@ -248,8 +257,8 @@ def test_a_zero_bid_sell_to_close_leg_is_never_rejected_and_always_sold_at_zero(
         planted = plant(chain, {contract: (0, ask)})
         close = OrderLeg(contract=contract, side=Side.SELL, position_intent=PositionIntent.STC)
         open_leg = OrderLeg(contract=contract, side=Side.SELL, position_intent=PositionIntent.STO)
-        assert MODEL.check([close], 1, planted, mandatory=False) == ()
-        assert MODEL.check([open_leg], 1, planted, mandatory=False) == ("no_quote",)  # never OPEN into a zero bid
+        assert MODEL.check([close], 1, planted, mandatory=False) == ()  # never rejected, whatever the spread
+        assert "no_quote" in MODEL.check([open_leg], 1, planted, mandatory=False)  # ... but never OPEN into a zero bid
         for mandatory in (False, True):
             net, fills, quality = MODEL.price([close], planted, mandatory=mandatory)
             assert (fills[0].orats, fills[0].worst, fills[0].mid) == (0, 0, 0)

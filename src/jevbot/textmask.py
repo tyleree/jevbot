@@ -222,12 +222,13 @@ _DAYS_AMBIGUOUS: Final[tuple[str, ...]] = ("Sat", "Sun")
 
 _PEOPLE_TITLE_RE: Final = re.compile(r"\b(?:Chair|Chairman|President|Governor|Secretary|CEO) [A-Z][a-z]+(?: [A-Z][a-z]+)?")
 _EXCHANGE_TICKER_RE: Final = re.compile(r"\((?:NYSE|NASDAQ|AMEX|ARCA):\s*[A-Z.]{1,6}\)")
-_CASHTAG_RE: Final = re.compile(r"\$[A-Z]{1,6}\b")
+_CASHTAG_RE: Final = re.compile(r"\$([A-Z]{1,6})\b")
 _YEAR_RE: Final = re.compile(r"\b(?:19|20)\d{2}\b")
 _PERIOD_RE: Final = re.compile(r"\bQ[1-4]\b|\bFY\s?\d{2,4}\b|\b[1-4]Q\b|\bH[12]\b")
 _ORDINAL_RE: Final = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)\b", re.IGNORECASE)
 _SINCE_RE: Final = re.compile(rf"\bsince {re.escape(MASK_MONTH)}(?: {re.escape(MASK_YEAR)})?", re.IGNORECASE)
 _RECORD_RE: Final = re.compile(r"\brecord (?:high|low)\b|\ball-time\b", re.IGNORECASE)
+_REPEATED_LEVEL_RE: Final = re.compile(rf"{re.escape(MASK_LEVEL)}(?:\s+{re.escape(MASK_LEVEL)})+")
 _BASIS_POINTS_RE: Final = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:basis points?|bps|bp)\b", re.IGNORECASE)
 _PERCENT_RE: Final = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(?:%|percent\b|pct\b)", re.IGNORECASE)
 _NUMBER_RE: Final = re.compile(r"\$?\d[\d,]*(?:\.\d+)?")
@@ -288,13 +289,25 @@ def _mask_tokens(text: str, tokens: Sequence[str], replacement: str, *, ignore_c
     return pattern.sub(replace, text)
 
 
-def _mask_symbols(text: str, symbols: Sequence[str]) -> str:
-    """Bare tickers from the item's own `symbols` list (5.8 step 4a)."""
-    tickers = [symbol for symbol in symbols if symbol and symbol.isalpha()]
+def _mask_symbols(text: str, symbols: Sequence[str], replacement: str) -> str:
+    """Bare tickers (the item's own `symbols` plus the tokens that carried a `$` cashtag sigil, 5.8 step 4a)."""
+    tickers = sorted({symbol for symbol in symbols if symbol and symbol.isalpha()}, key=lambda s: (-len(s), s))
     if not tickers:
         return text
     pattern = re.compile(_WORD_LEFT + "(?:" + "|".join(re.escape(symbol) for symbol in tickers) + ")" + _WORD_RIGHT)
-    return pattern.sub("a large company", text)
+    return pattern.sub(replacement, text)
+
+
+def _strip_cashtags(text: str) -> tuple[str, list[str]]:
+    """Drop the `$` sigil of every cashtag and return the bare tokens: the `$` must not survive as a leak pattern, and
+    a cashtag of one of our own funds must still reach the DICTIONARY (`$QQQ` -> "the fund", not "a large company")."""
+    tokens: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        tokens.append(match.group(1))
+        return match.group(1)
+
+    return _CASHTAG_RE.sub(replace, text), tokens
 
 
 def _magnitude(match: re.Match[str]) -> str:
@@ -326,11 +339,12 @@ def mask(text: str, terms: MaskTerms, *, symbols: Sequence[str] = ()) -> str:
     Idempotent: `mask(mask(x)) == mask(x)`; every replacement phrase is lower case and free of digits, so no pass can
     match its own output.
     """
-    out = _apply_dictionary(text, terms)
+    company = terms.replacements["companies"]
+    out = _EXCHANGE_TICKER_RE.sub(company, text)  # `(NASDAQ: AAPL)` goes as one token, before the index dictionary sees it
+    out, cashtags = _strip_cashtags(out)
+    out = _apply_dictionary(out, terms)
     out = _PEOPLE_TITLE_RE.sub(terms.replacements["people"], out)
-    out = _EXCHANGE_TICKER_RE.sub(terms.replacements["companies"], out)
-    out = _CASHTAG_RE.sub(terms.replacements["companies"], out)
-    out = _mask_symbols(out, symbols)
+    out = _mask_symbols(out, [*symbols, *cashtags], company)
     # dates
     out = _mask_tokens(out, _MONTHS_FULL, MASK_MONTH, ignore_case=True, near_number=False)
     out = _mask_tokens(out, _MONTHS_ABBR, MASK_MONTH, ignore_case=False, near_number=False)
@@ -343,6 +357,7 @@ def mask(text: str, terms: MaskTerms, *, symbols: Sequence[str] = ()) -> str:
     out = _ORDINAL_RE.sub(MASK_DAY, out)
     out = _SINCE_RE.sub(MASK_LEVEL, out)
     out = _RECORD_RE.sub(MASK_LEVEL, out)
+    out = _REPEATED_LEVEL_RE.sub(MASK_LEVEL, out)  # "record high since [month]" is ONE notable level, not two
     # numbers (Jev is weak at them): basis points, then percentages, then everything else
     out = _BASIS_POINTS_RE.sub(f"{MASK_NUMBER} basis points", out)
     out = _PERCENT_RE.sub(_magnitude, out)

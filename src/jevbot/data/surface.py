@@ -127,8 +127,8 @@ def _expiry_times(expiry: date, ts: datetime, calendar: "Calendar") -> tuple[dat
 
 
 def _round_cents(value: float) -> int:
-    """Round half up to the cent - the project's one money rounding for derived price levels."""
-    return int(math.floor(value + 0.5))
+    """Round half UP to the cent - the project's one rounding for derived price levels (the chain factory's `fwd` too)."""
+    return math.floor(value + 0.5)
 
 
 def _single_fwd(block: pd.DataFrame) -> int | None:
@@ -141,10 +141,11 @@ def _single_fwd(block: pd.DataFrame) -> int | None:
     return fwd if fwd > 0 else None
 
 
-def _two_sided(block: pd.DataFrame) -> FloatArray:
+def _two_sided(block: pd.DataFrame) -> BoolArray:
+    """`Quote.valid()` per row: `bid > 0 and ask > bid`. Forwards, IVs and smile fits use two-sided quotes only (2.2)."""
     bid = pd.Series(block["bid"]).to_numpy(dtype=np.float64)
     ask = pd.Series(block["ask"]).to_numpy(dtype=np.float64)
-    mask: FloatArray = np.where((bid > 0.0) & (ask > bid), 1.0, 0.0)
+    mask: BoolArray = (bid > 0.0) & (ask > bid)
     return mask
 
 
@@ -174,7 +175,7 @@ def parity_forwards(table: pd.DataFrame, rate: float, ts: datetime, calendar: "C
         if times is None:
             continue
         _, tau, _ = times
-        two_sided = _two_sided(block) > 0.0
+        two_sided = _two_sided(block)
         right = pd.Series(block["right"]).astype(str).to_numpy()
         strike = pd.Series(block["strike_milli"]).to_numpy(dtype=np.int64)
         mid2 = pd.Series(block["bid"]).to_numpy(dtype=np.float64) + pd.Series(block["ask"]).to_numpy(dtype=np.float64)
@@ -434,9 +435,7 @@ def fit_smile(table: pd.DataFrame, expiry: date, ts: datetime, calendar: "Calend
     )
 
 
-def fit_smiles(
-    table: pd.DataFrame, ts: datetime, calendar: "Calendar", expiries: Sequence[date] | None = None
-) -> dict[date, SmileFit]:
+def fit_smiles(table: pd.DataFrame, ts: datetime, calendar: "Calendar", expiries: Sequence[date] | None = None) -> dict[date, SmileFit]:
     """`fit_smile` for every listed expiry that admits one (expiries without a fit are simply absent from the mapping)."""
     wanted = _expiry_dates(table) if expiries is None else tuple(expiries)
     out: dict[date, SmileFit] = {}
@@ -599,7 +598,7 @@ def total_variance_at(term: Sequence[TermNode], tt: float) -> tuple[float, str]:
         raise DataUnavailable("no ATM term nodes: total variance is undefined")
     if not (tt > 0.0 and math.isfinite(tt)):
         raise ValueError(f"tt must be a positive number of sessions, got {tt!r}")
-    variance = [(node[0] > 0.0) and (node[2] / 1e4) ** 2 * node[0] or 0.0 for node in nodes]
+    variance = [(node[2] / 1e4) ** 2 * node[0] if node[0] > 0.0 else 0.0 for node in nodes]
     times = [float(node[1]) for node in nodes]
     if tt <= times[0]:
         if tt == times[0]:

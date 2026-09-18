@@ -131,13 +131,9 @@ class DataView:
         """The partition paths this view has opened (13.1: the engine asserts this set is a subset of the run's selection)."""
         return tuple(dict.fromkeys(self._opened))
 
-    def _touch(
-        self, field: str, source: str, payload: object, knowable_at: datetime | None, event_time: datetime | None = None
-    ) -> None:
+    def _touch(self, field: str, source: str, payload: object, knowable_at: datetime | None, event_time: datetime | None = None) -> None:
         stamp = self._as_of if knowable_at is None else pd.Timestamp(knowable_at).to_pydatetime(warn=False).astimezone(UTC)
-        item = ProvenanceInput(
-            field=field, source=source, event_time=event_time, knowable_at=stamp, payload_sha256=_digest(payload)
-        )
+        item = ProvenanceInput(field=field, source=source, event_time=event_time, knowable_at=stamp, payload_sha256=_digest(payload))
         if item not in self._touched:
             self._touched.append(item)
 

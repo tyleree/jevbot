@@ -476,6 +476,39 @@ def daily_frame(stores: StoreArg | Sequence[StoreArg]) -> pd.DataFrame:
     return frame
 
 
+def position_marks_frame(store: StoreArg) -> pd.DataFrame:
+    """The per-position part of every MARK entry: `session, position_id, liq_value, mid_value, stale` (2.11).
+
+    `liq_value` is the conservative liquidation value in signed cents per share - what closing the structure would COST
+    now, negative when it would pay us (10.5) - which is what the maximum-adverse-excursion metric of 12.2 needs.
+    """
+    handle, owned = _store(store)
+    try:
+        records: list[dict[str, Any]] = []
+        for row in handle.rows(LedgerKind.MARK):
+            positions = row["payload"].get("positions") or {}
+            if not isinstance(positions, dict):
+                continue
+            for position_id, entry in positions.items():
+                if not isinstance(entry, dict):
+                    continue
+                records.append(
+                    {
+                        "seq": row["seq"],
+                        "session": row["session"],
+                        "position_id": position_id,
+                        "liq_value": entry.get("liq_value"),
+                        "mid_value": entry.get("mid_value"),
+                        "stale": bool(entry.get("stale")),
+                    }
+                )
+        columns = ("seq", "session", "position_id", "liq_value", "mid_value", "stale")
+        return pd.DataFrame.from_records(records) if records else _empty(columns)
+    finally:
+        if owned:
+            handle.close()
+
+
 def marks_frame(store: StoreArg) -> pd.DataFrame:
     """MARK entries: equity / cash per band, exposure and greeks (2.11)."""
     handle, owned = _store(store)

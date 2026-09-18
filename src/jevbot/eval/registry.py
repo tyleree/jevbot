@@ -58,9 +58,9 @@ __all__ = [
     "git_head",
     "git_path_committed",
     "installed_sdk_version",
-    "run_git",
     "is_selection_trial",
     "load_scan_facts",
+    "run_git",
     "scan_facts_problems",
 ]
 

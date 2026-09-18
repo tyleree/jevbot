@@ -211,7 +211,6 @@ def test_ci_supports_an_arbitrary_statistic() -> None:
 # ======================================================================================================================
 
 
-@pytest.mark.slow
 def test_ci_coverage_on_ar1_is_nominal_for_the_block_bootstrap_and_broken_for_iid() -> None:
     n_sims, n, phi, level = 300, 400, 0.6, 0.90
     rng = np.random.default_rng(2026)
@@ -251,7 +250,6 @@ def _overlapping_correlated_d(rng: np.random.Generator, *, n: int, horizon: int 
     return np.asarray(smoothed.mean(axis=0), dtype=np.float64)
 
 
-@pytest.mark.slow
 def test_size_of_the_one_sided_bound_is_nominal_for_the_block_method_and_over_sized_for_iid() -> None:
     """12.3 / 15.1: nominal size for the chosen interval, `over-sized` detected for an i.i.d. bootstrap (block = 1)."""
     n_sims, n, alpha = 250, 320, 0.05
@@ -272,7 +270,6 @@ def test_size_of_the_one_sided_bound_is_nominal_for_the_block_method_and_over_si
     assert iid_rate > block_rate + 0.05
 
 
-@pytest.mark.slow
 def test_the_bound_has_power_against_a_genuinely_positive_mean() -> None:
     """The size check must not be passed by a bound that never rejects anything."""
     n_sims, n, alpha = 120, 320, 0.05
