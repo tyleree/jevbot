@@ -198,7 +198,7 @@ def test_min_trl_rejects_an_impossible_confidence() -> None:
 # ======================================================================================================================
 
 
-def _series(rng: np.random.Generator, n: int = 750, mu: float = 0.0008, sd: float = 0.01) -> np.ndarray:
+def _series(rng: np.random.Generator, n: int = 750, mu: float = 0.0015, sd: float = 0.01) -> np.ndarray:
     return np.asarray(rng.normal(mu, sd, n), dtype=np.float64)
 
 

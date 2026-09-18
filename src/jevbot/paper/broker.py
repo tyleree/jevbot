@@ -27,13 +27,13 @@ resting, and any fill is booked through the one fill path (9.6).
 
 import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Final, TypeVar
 
 from alpaca.common.exceptions import APIError
-from alpaca.trading.enums import OrderClass, OrderSide, OrderType, PositionIntent, QueryOrderStatus, TimeInForce
+from alpaca.trading.enums import OrderClass, OrderSide, PositionIntent, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest, MarketOrderRequest, OptionLegRequest, OrderRequest
 
 from jevbot.config import OrdersConfig
@@ -154,6 +154,14 @@ def _price_cents(value: object, what: str) -> int:
 
 def _enum_value(value: object) -> str:
     return str(getattr(value, "value", value))
+
+
+def _model(value: Any, what: str) -> Any:
+    """Unwrap an SDK response that must be a model object. The clients are never built with the raw-data flag (11.1), so a
+    bare `dict` here means the SDK surface changed under us: fail closed rather than silently attribute-miss."""
+    if isinstance(value, dict):
+        raise BrokerError(f"the broker returned raw {what} data instead of a model object: the pinned alpaca-py surface changed")
+    return value
 
 
 def to_order_state(raw: Any, *, fallback_client_order_id: str | None = None) -> OrderState:
@@ -448,7 +456,7 @@ class AlpacaPaperBroker:
         def target() -> None:
             try:
                 box.append(fn())
-            except BaseException as exc:  # noqa: BLE001 - re-raised on the calling thread, classified below
+            except BaseException as exc:
                 failure.append(exc)
 
         worker = threading.Thread(target=target, name="alpaca-call", daemon=True)
@@ -510,7 +518,7 @@ class AlpacaPaperBroker:
 
     def raw_clock(self) -> RawClock:
         """The vendor clock reading, through this adapter's deadline / timeout / rate limit; `BrokerClock` calls it (11.4)."""
-        clock: RawClock = self._call(self._trading.get_clock, write=False)
+        clock: RawClock = _model(self._call(self._trading.get_clock, write=False), "clock")
         return clock
 
     def raw_calendar(self, start: date, end: date) -> Sequence[Any]:
@@ -642,7 +650,7 @@ class AlpacaPaperBroker:
         The kill switch flips this to True only once the account is verified flat (9.5 K6): a suspended account cannot place
         closing orders either.
         """
-        current = self._call(self._trading.get_account_configurations, write=False)
+        current = _model(self._call(self._trading.get_account_configurations, write=False), "account configuration")
         updated = current.model_copy(update={"suspend_trade": bool(suspended)})
         self._call(lambda: self._trading.set_account_configurations(updated), write=True)
 
@@ -672,15 +680,15 @@ def reject_tag(message: str) -> str:
 def _api_error_parts(exc: APIError) -> tuple[int | None, int | None, str]:
     try:
         status = exc.status_code
-    except Exception:  # noqa: BLE001 - the SDK reads the status off an attached HTTP error that may be absent
+    except Exception:
         status = None
     try:
         code = exc.code
-    except Exception:  # noqa: BLE001 - `code` json-decodes the body, which is not guaranteed to be json
+    except Exception:
         code = None
     try:
         message = exc.message
-    except Exception:  # noqa: BLE001 - same
+    except Exception:
         message = str(exc)
     return (None if status is None else int(status), None if code is None else int(code), str(message))
 

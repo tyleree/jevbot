@@ -88,7 +88,7 @@ def boottime() -> float:
     return time.clock_gettime(getattr(time, "CLOCK_BOOTTIME", time.CLOCK_MONOTONIC))
 
 
-def to_utc(value: datetime, what: str) -> datetime:
+def to_utc(value: object, what: str) -> datetime:
     """A vendor datetime -> tz-aware UTC. A NAIVE value is refused: silently assuming a zone is how skew bugs are born."""
     if not isinstance(value, datetime):
         raise BrokerError(f"the broker reported {what}={value!r}, which is not a datetime")
@@ -195,12 +195,12 @@ class BrokerClock:
         rtt_s = max(0.0, t1 - t0)
         broker_ts = to_utc(raw.timestamp, "clock timestamp")
         local_mid = local0 + timedelta(seconds=rtt_s / 2)
-        skew_ms = int(round(abs((local_mid - broker_ts).total_seconds()) * _MS))
+        skew_ms = round(abs((local_mid - broker_ts).total_seconds()) * _MS)
 
         reading = ClockReading(
             broker_ts=broker_ts,
             local_ts=local_mid,
-            rtt_ms=int(round(rtt_s * _MS)),
+            rtt_ms=round(rtt_s * _MS),
             skew_ms=skew_ms,
             is_open=bool(raw.is_open),
             next_open=to_utc(raw.next_open, "clock next_open"),
@@ -303,7 +303,9 @@ class AlpacaCalendar:
             try:
                 theirs_open, theirs_close = other.open_close(session.day)
             except ValueError:
-                self._alerts.append(f"calendar disagreement on {session.day.isoformat()}: the broker lists a session the cross-check does not")
+                self._alerts.append(
+                    f"calendar disagreement on {session.day.isoformat()}: the broker lists a session the cross-check does not"
+                )
                 checked.append(session)
                 continue
             if theirs_close != session.close:

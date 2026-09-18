@@ -42,11 +42,11 @@ from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.trading.client import TradingClient
 
 from jevbot.config import (
+    _FORBIDDEN_ALPACA_PREFIX,  # the single source of truth for the legacy-prefix guard (INV-02); no credential literal lives here
     ENV_ALPACA_PAPER_KEY,
     ENV_ALPACA_PAPER_SECRET,
     FORBIDDEN_ALPACA_ENV,
     Secrets,
-    _FORBIDDEN_ALPACA_PREFIX,  # the single source of truth for the legacy-prefix guard (INV-02); no credential literal lives here
 )
 from jevbot.errors import BrokerError, PaperGuardError
 from jevbot.types import AccountSnapshot, Cents

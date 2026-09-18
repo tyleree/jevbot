@@ -220,6 +220,13 @@ def _store(arg: StoreArg) -> tuple[RunStore, bool]:
     return RunStore(arg), True
 
 
+def _store_args(stores: "StoreArg | Sequence[StoreArg]") -> list[StoreArg]:
+    """One store or several: `calibration_frame(store)` and `calibration_frame([a, b])` both work."""
+    if isinstance(stores, RunStore | Path | str):
+        return [stores]
+    return list(stores)
+
+
 def open_stores(args: Iterable[StoreArg], *, verify: bool = False) -> list[RunStore]:
     """Open several run stores; a path becomes a `RunStore`, an open handle is passed through."""
     out: list[RunStore] = []
@@ -365,7 +372,7 @@ def calibration_frame(stores: StoreArg | Sequence[StoreArg], *, resolved_only: b
     forecasts are dropped by default (`resolved_only`); VOID outcomes (`y` is NA) are kept so the report can list them,
     and a MISSING forecast (`p_ppm = NULL`) keeps `p = NaN` with `missing = True`.
     """
-    args: Sequence[StoreArg] = stores if isinstance(stores, list | tuple) else [stores]
+    args = _store_args(stores)
     parts: list[pd.DataFrame] = []
     for arg in args:
         handle, owned = _store(arg)
@@ -421,7 +428,7 @@ def daily_frame(stores: StoreArg | Sequence[StoreArg]) -> pd.DataFrame:
     The headline-band equity of a session is the next session's `day_start_equity` (9.5), so this frame is the P&L
     series every metric, bootstrap and figure is computed from.
     """
-    args: Sequence[StoreArg] = stores if isinstance(stores, list | tuple) else [stores]
+    args = _store_args(stores)
     parts: list[pd.DataFrame] = []
     for arg in args:
         handle, owned = _store(arg)

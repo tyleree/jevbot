@@ -181,7 +181,10 @@ def bootstrap_ci(
     point = float(stat(arr))
 
     if method == "percentile":
-        draws = np.asarray([stat(_resampled(arr, indices[b])) for b in range(reps)], dtype=np.float64)
+        if stat is _mean:  # the pre-registered statistic: one vectorised pass instead of `reps` python calls
+            draws = np.asarray(arr[indices].mean(axis=1), dtype=np.float64)
+        else:
+            draws = np.asarray([stat(_resampled(arr, indices[b])) for b in range(reps)], dtype=np.float64)
         usable = draws[np.isfinite(draws)]
         if usable.size == 0:
             raise EvalError("every bootstrap replicate was non-finite")
