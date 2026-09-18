@@ -51,6 +51,7 @@ __all__ = [
     "open_stores",
     "order_status_frame",
     "outcomes_frame",
+    "position_marks_frame",
     "reference_history",
     "risk_events_frame",
     "risk_verdicts_frame",

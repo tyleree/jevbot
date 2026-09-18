@@ -57,6 +57,8 @@ __all__ = [
     "FakeSession",
     "FakeTradingClient",
     "api_error",
+    "calendar_models",
+    "fake_clients",
 ]
 
 FAULTS: Final[tuple[str, ...]] = (
@@ -72,7 +74,6 @@ FAULTS: Final[tuple[str, ...]] = (
 TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({"filled", "canceled", "expired", "rejected", "replaced"})
 
 _DEFAULT_CLOCK_TS: Final = datetime(2026, 9, 17, 19, 45, tzinfo=UTC)
-_DEFAULT_SESSION: Final = date(2026, 9, 17)
 
 
 class _HttpError:

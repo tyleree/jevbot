@@ -22,13 +22,36 @@ import copy
 import json
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Final
 
 import httpx2
 
+from jevbot import canon, ids, vocab
+from jevbot import questions as questions_module
 from jevbot.jev.mock import mock_wire_answers
+from jevbot.types import DecisionKind, DecisionRequest, RequestKind, Slot, SnapshotKey, Variant
 
-__all__ = ["DEFAULT_MODEL", "DEFAULT_USAGE", "REQUEST_ID", "SYSTEM_ONE_PATH", "Fault", "make_jev_transport"]
+__all__ = [
+    "DEFAULT_MODEL",
+    "DEFAULT_USAGE",
+    "ENTRY_STATE",
+    "MANAGE_STATE",
+    "NAMESPACE",
+    "NEWS_BLOCK",
+    "PROBE_STATE",
+    "REQUEST_ID",
+    "SESSION",
+    "SYSTEM_ONE_PATH",
+    "Fault",
+    "make_jev_transport",
+    "make_request",
+    "sample_state",
+]
+
+# the namespace and session WP03's own tests use
+NAMESPACE: Final = ids.namespace("wp03", "jev-1.13.0", 0)
+SESSION: Final = date(2024, 5, 17)
 
 SYSTEM_ONE_PATH: Final = "/v1/systemone"
 DEFAULT_MODEL: Final = "jev-1.13.0"
@@ -174,7 +197,9 @@ def _apply(fault: Fault, body: dict[str, Any], request: httpx2.Request) -> httpx
     if kind == "unknown_label":
         answer = _first_of_type(body["answers"], "choice")
         probabilities = answer["probabilities"]
-        answer["probabilities"] = {(str(fault.arg) if index == 0 else key): value for index, (key, value) in enumerate(probabilities.items())}
+        answer["probabilities"] = {
+            (str(fault.arg) if index == 0 else key): value for index, (key, value) in enumerate(probabilities.items())
+        }
         return None
     if kind == "prob_sum":
         answer = _first_of_type(body["answers"], "choice")
@@ -238,3 +263,218 @@ def make_jev_transport(
         return httpx2.Response(200, json=body, headers=headers, request=request)
 
     return httpx2.MockTransport(handler)
+
+
+# ======================================================================================================================
+# Sample states and requests (DESIGN 5.6 / 5.7 / 6.6)
+#
+# The four literals below are the example states of the design, copied verbatim (`tests/unit/test_questions.py` re-parses
+# DESIGN.md and compares them, and asserts their key order against `vocab.STATE_SHAPES`). They are what WP03's own tests
+# send through the transport - WP02 owns the real `StateBuilder` and its golden states; a wave-1 package never imports
+# another wave-1 package, so the requests here are built by hand from the same documented bytes.
+# ======================================================================================================================
+
+ENTRY_STATE: Final[dict[str, Any]] = {
+    "schema": "state.v1.entry",
+    "context": {
+        "underlying_alias": "UNDERLYING_A",
+        "underlying_kind": "broad US large-cap equity index ETF",
+        "decision_session": "near the close of the regular trading session",
+        "holding_window_sessions": {"value": 20, "bucket": "about_four_weeks: roughly twenty trading sessions"},
+    },
+    "market": {
+        "as_of": "prior session close",
+        "vol_index_pctile_1y": {"value": 35, "bucket": "low: 20th to 40th percentile of the past year"},
+        "vol_index_change_1w": "steady: little change",
+        "vol_term_structure": "contango: 30-day implied volatility below 3-month implied volatility",
+        "near_term_stress": "neutral: 9-day and 30-day implied volatility about equal",
+        "vol_of_vol": "normal: middle of the past year's range",
+        "tail_skew_index": "elevated: top 30 percent of the past year",
+    },
+    "underlying": {
+        "trend": {
+            "direction": "up: price above rising 20-day and 50-day averages",
+            "strength": "moderate: the 20-day move is ordinary relative to normal daily swings",
+        },
+        "momentum": {
+            "distance_from_20d_avg_in_atr": {"value": 1, "bucket": "near_average: price close to its 20-day average"},
+            "consecutive_closes": {"value": 3, "bucket": "short_up_streak: two or three higher closes in a row"},
+        },
+        "range": {
+            "realized_vol_20d_pctile_1y": {"value": 22, "bucket": "low: 20th to 40th percentile of the past year"},
+            "realized_vol_change": "stable: last week's swings similar to the past month's",
+            "gap_today": "none: opened near the prior close",
+            "move_today": "quiet: little net change today",
+        },
+        "levels": {"distance_from_52w_high": "near_high: within 2 percent of the 1-year high"},
+    },
+    "vol_surface": {
+        "iv_rank_1y": {"value": 62, "bucket": "upper_middle: 60 to 80 percent of the way from the past year's low to its high"},
+        "iv_vs_realized": "iv_rich: implied volatility clearly above recent realized volatility",
+        "iv_change_1w": "rising: up 5 to 15 percent",
+        "term_structure": "contango: 30-day implied volatility below 90-day implied volatility",
+        "skew": "normal: downside puts moderately bid",
+        "expected_move_1_session": {
+            "value": 9,
+            "unit": "tenths of a percent",
+            "bucket": "half_to_1_percent: one expected move over this horizon is about half to 1 percent",
+        },
+        "expected_move_5_sessions": {
+            "value": 21,
+            "unit": "tenths of a percent",
+            "bucket": "2_to_4_percent: one expected move over this horizon is about 2 to 4 percent",
+        },
+        "expected_move_holding_window": {
+            "value": 42,
+            "unit": "tenths of a percent",
+            "bucket": "4_to_6_percent: one expected move over this horizon is about 4 to 6 percent",
+        },
+    },
+    "events": {
+        "coverage": "scheduled events tracked: central-bank rate decisions only",
+        "inside_holding_window": ["major central-bank rate decision in 2 sessions"],
+        "next_session": [],
+        "earnings": "not_applicable_index_etf",
+    },
+}
+
+NEWS_BLOCK: Final[dict[str, Any]] = {
+    "news_status": "present",
+    "news": {
+        "since_previous_session": [
+            {
+                "age": "6h",
+                "source_type": "newswire",
+                "headline": "<sanitised, masked headline>",
+                "summary": "<sanitised, masked summary or null>",
+            }
+        ],
+        "earlier": [{"age": "2d", "source_type": "newswire", "headline": "<sanitised, masked headline>", "summary": None}],
+    },
+}
+
+MANAGE_STATE: Final[dict[str, Any]] = {
+    "schema": "state.v1.manage",
+    "context": {
+        "underlying_alias": "UNDERLYING_A",
+        "underlying_kind": "broad US large-cap equity index ETF",
+        "decision_session": "near the close of the regular trading session",
+    },
+    "position": {
+        "structure": "put_credit_spread",
+        "directional_exposure": "neutral to bullish: profits if price stays above the short put strike",
+        "vol_exposure": "short premium: profits from time passing and falling implied volatility",
+        "entry_thesis": "opened with trend up, implied volatility iv_rich versus realized, iv rank upper_middle, no tracked event inside the holding window",
+        "sessions_held": {"value": 6, "bucket": "about_one_week: held about one week"},
+        "time_to_expiry": {"value": 27, "bucket": "two_to_four_weeks: about two to four weeks until expiry"},
+        "pnl": "small_gain: under one quarter of the maximum profit",
+        "short_strike_distance": "about_one_move: about one expected move from the short strike",
+        "price_vs_breakeven": None,
+    },
+    "changes_since_entry": {
+        "trend_at_entry": "up",
+        "trend_now": "mixed",
+        "iv_vs_realized_at_entry": "iv_rich",
+        "iv_vs_realized_now": "iv_fair",
+        "iv_change_since_entry": "falling: down 5 to 15 percent",
+        "underlying_move_since_entry": {"value": 0, "bucket": "little_change: price has moved little relative to the position since entry"},
+    },
+    "market": {
+        "as_of": "prior session close",
+        "vol_index_pctile_1y": {"value": 35, "bucket": "low: 20th to 40th percentile of the past year"},
+        "vol_index_change_1w": "steady: little change",
+        "vol_term_structure": "contango: 30-day implied volatility below 3-month implied volatility",
+        "near_term_stress": "neutral: 9-day and 30-day implied volatility about equal",
+        "vol_of_vol": "normal: middle of the past year's range",
+        "tail_skew_index": "elevated: top 30 percent of the past year",
+    },
+    "underlying": {
+        "trend": {
+            "direction": "up: price above rising 20-day and 50-day averages",
+            "strength": "moderate: the 20-day move is ordinary relative to normal daily swings",
+        },
+        "momentum": {
+            "distance_from_20d_avg_in_atr": {"value": 1, "bucket": "near_average: price close to its 20-day average"},
+            "consecutive_closes": {"value": 3, "bucket": "short_up_streak: two or three higher closes in a row"},
+        },
+        "range": {
+            "realized_vol_20d_pctile_1y": {"value": 22, "bucket": "low: 20th to 40th percentile of the past year"},
+            "realized_vol_change": "stable: last week's swings similar to the past month's",
+            "gap_today": "none: opened near the prior close",
+            "move_today": "quiet: little net change today",
+        },
+        "levels": {"distance_from_52w_high": "near_high: within 2 percent of the 1-year high"},
+    },
+    "vol_surface": {
+        "iv_rank_1y": {"value": 62, "bucket": "upper_middle: 60 to 80 percent of the way from the past year's low to its high"},
+        "iv_vs_realized": "iv_rich: implied volatility clearly above recent realized volatility",
+        "iv_change_1w": "rising: up 5 to 15 percent",
+        "term_structure": "contango: 30-day implied volatility below 90-day implied volatility",
+        "skew": "normal: downside puts moderately bid",
+    },
+    "events": {
+        "coverage": "scheduled events tracked: central-bank rate decisions only",
+        "inside_holding_window": ["major central-bank rate decision in 2 sessions"],
+        "next_session": [],
+        "earnings": "not_applicable_index_etf",
+    },
+}
+
+PROBE_STATE: Final[dict[str, Any]] = {"schema": "state.v1.probe_recall", "ticker": "SPY", "date": "2024-03-15"}
+
+
+def sample_state(kind: RequestKind = RequestKind.ENTRY) -> dict[str, Any]:
+    """A fresh copy of the documented state of `kind` (5.6 / 5.7 / 6.6)."""
+    if kind is RequestKind.ENTRY:
+        return copy.deepcopy(ENTRY_STATE)
+    if kind is RequestKind.ENTRY_TEXT:
+        return {**copy.deepcopy(ENTRY_STATE), "schema": "state.v1.entry_text", **copy.deepcopy(NEWS_BLOCK)}
+    if kind is RequestKind.MANAGE:
+        return copy.deepcopy(MANAGE_STATE)
+    if kind is RequestKind.MANAGE_TEXT:
+        return {
+            **copy.deepcopy(MANAGE_STATE),
+            "schema": "state.v1.manage_text",
+            "news_since_entry": copy.deepcopy(NEWS_BLOCK["news"]),
+        }
+    return copy.deepcopy(PROBE_STATE)
+
+
+def make_request(
+    kind: RequestKind = RequestKind.ENTRY,
+    variant: Variant = Variant.BASE,
+    *,
+    state: Mapping[str, Any] | None = None,
+    questions: Mapping[str, Mapping[str, Any]] | None = None,
+    namespace: str = NAMESPACE,
+    underlying: str = "SPY",
+    session: date = SESSION,
+    slot: Slot = Slot.EOD,
+    subject: str = ids.ENTRY_SUBJECT,
+) -> DecisionRequest:
+    """One `DecisionRequest` with real hashes and a real `decision_id` - exactly what `cycle.py` will build (2.5)."""
+    question_set_id = vocab.QUESTION_SET_ID[kind.value]
+    batch: dict[str, dict[str, Any]] = (
+        {qid: dict(question) for qid, question in questions.items()}
+        if questions is not None
+        else questions_module.question_set(question_set_id)
+    )
+    body = dict(state) if state is not None else sample_state(kind)
+    canon.ensure_state_safe(body, masked=kind is not RequestKind.PROBE, underlyings=(underlying,))
+    decision_kind: DecisionKind = "entry" if kind in (RequestKind.ENTRY, RequestKind.ENTRY_TEXT) else "manage"
+    position_subject = subject if decision_kind == "entry" else (subject if subject != ids.ENTRY_SUBJECT else "pos-0001")
+    return DecisionRequest(
+        kind=kind,
+        variant=variant,
+        question_set_id=question_set_id,
+        state=body,
+        questions=batch,
+        state_hash=canon.sha256_hex(canon.dumps_ordered(body)),
+        question_set_hash=questions_module.question_set_hash(batch),
+        namespace=namespace,
+        subject=position_subject,
+        underlying=underlying,
+        session=session,
+        key=SnapshotKey(session=session, slot=slot),
+        decision_id=ids.decision_id(namespace, session, underlying, decision_kind, position_subject),
+    )
