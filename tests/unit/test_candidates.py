@@ -10,9 +10,8 @@ $600-priced chain ends at `max_loss_per_contract <= budget_floor` or `exceeds_ri
 furthest-OTM one that fits, and the short leg never moves.
 """
 
-import math
-from collections.abc import Mapping, Sequence
-from datetime import date, timedelta
+from collections.abc import Sequence
+from datetime import date
 from typing import Any, Final
 
 import pandas as pd
@@ -28,7 +27,7 @@ from jevbot.candidates import (
     scan_columns,
     structure_tick,
 )
-from jevbot.config import CadenceConfig, CandidatesConfig, Config, DteConfig, LiquidityConfig, RiskConfig, UniverseConfig
+from jevbot.config import CadenceConfig, CandidatesConfig, Config, DteConfig, RiskConfig, UniverseConfig
 from jevbot.errors import InvariantError
 from jevbot.money import cdiv
 from jevbot.types import (
@@ -128,9 +127,7 @@ class StubFillModel:
                     codes.append("wide_spread")
         return tuple(sorted(set(codes), key=vocab.FILL_REJECTS.index))
 
-    def price(
-        self, legs: Sequence[OrderLeg], chain: ChainSnapshot, *, mandatory: bool
-    ) -> tuple[BandPrices, tuple[LegFill, ...], str]:
+    def price(self, legs: Sequence[OrderLeg], chain: ChainSnapshot, *, mandatory: bool) -> tuple[BandPrices, tuple[LegFill, ...], str]:
         fills: list[LegFill] = []
         for leg in legs:
             quote = chain.quote(leg.contract)
@@ -220,7 +217,9 @@ def with_long_strike(structure: Structure, right: Right, strike_milli: int, chai
         else:
             legs.append(leg)
     ordered = tuple(sorted(legs, key=lambda leg: (leg.contract.right is Right.CALL, leg.contract.strike_milli)))
-    return Structure(kind=structure.kind, underlying=structure.underlying, expiry=structure.expiry, last_session=structure.last_session, legs=ordered)
+    return Structure(
+        kind=structure.kind, underlying=structure.underlying, expiry=structure.expiry, last_session=structure.last_session, legs=ordered
+    )
 
 
 def long_leg(structure: Structure, right: Right) -> OptionContract:
@@ -442,16 +441,33 @@ def test_credit_shorts_stand_at_least_0_8_expected_moves_from_spot(kind: Structu
     # without the guard the short sits on the raw nearest-delta strike instead
     unguarded = cfg_with(candidates=CandidatesConfig(credit_short_min_em=0.0))
     loose = built(generator(unguarded).build(kind, view_of(chain), "SPY", budget_floor=DEFAULT_FLOOR))
-    assert loose.short_distance_em is not None and loose.short_distance_em < candidate.short_distance_em
+    assert loose.short_distance_em is not None
+    expiry = target_expiry(chain, 35)
+    raw = {
+        StructureKind.PUT_CREDIT: (nearest_delta(chain, expiry, Right.PUT, 0.25, min_bid=10).strike_milli,),
+        StructureKind.CALL_CREDIT: (nearest_delta(chain, expiry, Right.CALL, 0.25, min_bid=10).strike_milli,),
+        StructureKind.IRON_CONDOR: tuple(
+            sorted(nearest_delta(chain, expiry, right, 0.16, min_bid=10).strike_milli for right in (Right.PUT, Right.CALL))
+        ),
+    }[kind]
+    assert short_strikes(loose.structure) == raw
+    if kind is StructureKind.IRON_CONDOR:
+        # the 0.16-delta short is about one expected move out already, so the guard is inert and moves nothing
+        assert loose.short_distance_em == candidate.short_distance_em >= 0.8
+        assert short_strikes(candidate.structure) == raw == (427_000, 472_000)
+    else:
+        assert loose.short_distance_em < 0.8 <= candidate.short_distance_em
+        assert short_strikes(loose.structure) != short_strikes(candidate.structure)
     if kind is StructureKind.PUT_CREDIT:
-        assert short_strikes(loose.structure) == (nearest_delta(chain, target_expiry(chain, 35), Right.PUT, 0.25, min_bid=10).strike_milli,)
         assert short_strikes(loose.structure) == (436_000,) and short_strikes(candidate.structure) == (432_000,)
 
 
 def test_a_debit_spread_short_leg_has_no_expected_move_guard() -> None:
     chain = make_chain()
     candidate = built(generator().build(StructureKind.CALL_DEBIT, view_of(chain), "SPY", budget_floor=DEFAULT_FLOOR))
-    assert short_strikes(candidate.structure) == (nearest_delta(chain, target_expiry(chain, 35), Right.CALL, 0.25, min_bid=10).strike_milli,)
+    assert short_strikes(candidate.structure) == (
+        nearest_delta(chain, target_expiry(chain, 35), Right.CALL, 0.25, min_bid=10).strike_milli,
+    )
     assert short_strikes(candidate.structure) == (466_000,)
 
 
@@ -599,7 +615,7 @@ def test_eligible_is_the_structmath_filter() -> None:
     wide = contract_at(chain, expiry, Right.PUT, 433_000)
     hurt = widened_spread(thin_oi(crossed_quote(chain, crossed), thin), wide, 200)
     for contract, codes in (
-        (crossed, ("liq:crossed", "liq:spread")),
+        (crossed, ("liq:crossed",)),  # the sides swapped: ask < bid, so the relative-spread test is vacuous
         (thin, ("liq:oi",)),
         (wide, ("liq:spread",)),
     ):
@@ -629,7 +645,9 @@ def test_the_default_credit_and_debit_floors_are_feasible() -> None:
     """Section 8 / section 4: the shipped `[candidates]` ratio bounds must not reject the structures the deltas produce."""
     for chain in (make_chain(), six_hundred_dollar_chain(), make_chain("IWM", spot=10_000)):
         for kind in ALL_KINDS:
-            result = generator().build(kind, view_of(chain), "SPY" if chain.underlying == "SPY" else chain.underlying, budget_floor=DEFAULT_FLOOR)
+            result = generator().build(
+                kind, view_of(chain), "SPY" if chain.underlying == "SPY" else chain.underlying, budget_floor=DEFAULT_FLOOR
+            )
             if isinstance(result, CandidateReject):
                 assert result.rejects == ("exceeds_risk_budget",), (chain.underlying, chain.spot, kind, result.rejects)
                 continue
@@ -671,9 +689,12 @@ def test_the_ex_dividend_entry_block() -> None:
     otm = built(generator().build(StructureKind.CALL_CREDIT, view_of(chain, events=[event]), "SPY", budget_floor=DEFAULT_FLOOR))
     assert otm.rejects == ()  # the 0.25-delta short call is far above spot + dividend
     far = ex_dividend_event("SPY", date(2024, 7, 12), 150)  # beyond last_session
-    assert "exdiv_short_call" not in built(
-        generator(itm_short).build(StructureKind.CALL_CREDIT, view_of(chain, events=[far]), "SPY", budget_floor=10_000_000)
-    ).rejects
+    assert (
+        "exdiv_short_call"
+        not in built(
+            generator(itm_short).build(StructureKind.CALL_CREDIT, view_of(chain, events=[far]), "SPY", budget_floor=10_000_000)
+        ).rejects
+    )
 
 
 # ======================================================================================================================

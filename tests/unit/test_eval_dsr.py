@@ -121,8 +121,7 @@ def test_psr_is_na_for_a_short_track_record_or_a_negative_radicand() -> None:
 def test_sr0_matches_the_formula_evaluated_by_hand() -> None:
     var_sr, n_trials = 0.0025, 12
     expected = math.sqrt(var_sr) * (
-        (1.0 - EULER_MASCHERONI) * NORMAL.inv_cdf(1.0 - 1.0 / n_trials)
-        + EULER_MASCHERONI * NORMAL.inv_cdf(1.0 - 1.0 / (n_trials * math.e))
+        (1.0 - EULER_MASCHERONI) * NORMAL.inv_cdf(1.0 - 1.0 / n_trials) + EULER_MASCHERONI * NORMAL.inv_cdf(1.0 - 1.0 / (n_trials * math.e))
     )
     assert sr0(var_sr, n_trials) == pytest.approx(expected, abs=1e-9)
 
@@ -303,7 +302,17 @@ def test_other_purposes_do_not_count(purpose: str) -> None:
 
 @pytest.mark.parametrize(
     "flag",
-    ["baseline:4", "baseline:7", "placebo", "unmasked", "diagnostic", "shadow", "reference_history", "model_overlap", "ablation:buckets_only"],
+    [
+        "baseline:4",
+        "baseline:7",
+        "placebo",
+        "unmasked",
+        "diagnostic",
+        "shadow",
+        "reference_history",
+        "model_overlap",
+        "ablation:buckets_only",
+    ],
 )
 def test_excluded_flags_never_inflate_n(flag: str) -> None:
     """12.6: the ~1000 random-entry seeds would otherwise make `N` about 1000 and `SR0` meaningless."""
@@ -323,8 +332,12 @@ def test_derived_families_never_count(suffix: str) -> None:
 
 
 def test_another_family_or_namespace_does_not_count() -> None:
-    assert not counts_as_selection_trial(purpose="tune", flags=(), family="exp2", namespace="ns", reported_family="exp1", reported_namespace="ns")
-    assert not counts_as_selection_trial(purpose="tune", flags=(), family="exp1", namespace="other", reported_family="exp1", reported_namespace="ns")
+    assert not counts_as_selection_trial(
+        purpose="tune", flags=(), family="exp2", namespace="ns", reported_family="exp1", reported_namespace="ns"
+    )
+    assert not counts_as_selection_trial(
+        purpose="tune", flags=(), family="exp1", namespace="other", reported_family="exp1", reported_namespace="ns"
+    )
 
 
 def test_n_counts_failed_and_abandoned_trials() -> None:

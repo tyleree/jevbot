@@ -235,7 +235,9 @@ def test_ci_coverage_on_ar1_is_nominal_for_the_block_bootstrap_and_broken_for_ii
 # ======================================================================================================================
 
 
-def _overlapping_correlated_d(rng: np.random.Generator, *, n: int, horizon: int = 5, n_underlyings: int = 3, rho: float = 0.85) -> FloatArray:
+def _overlapping_correlated_d(
+    rng: np.random.Generator, *, n: int, horizon: int = 5, n_underlyings: int = 3, rho: float = 0.85
+) -> FloatArray:
     """A zero-mean `d_t` with the pre-registered structure: 5-session overlap and ~0.85 cross-ETF correlation (12.3).
 
     `d_t` is the cross-sectional mean of per-underlying `horizon`-session moving averages of correlated shocks, so it
@@ -334,9 +336,7 @@ def test_paired_bootstrap_uses_the_same_indices_for_both_series() -> None:
     """Identical series => the paired difference is exactly 0 in every replicate (12.5)."""
     rng = np.random.default_rng(41)
     a = rng.normal(0.0, 1.0, 200)
-    point, lo, hi = paired_bootstrap_ci(
-        a, a.copy(), lambda u, v: float(np.mean(u) - np.mean(v)), block=8.0, reps=300, level=0.95, rng=rng
-    )
+    point, lo, hi = paired_bootstrap_ci(a, a.copy(), lambda u, v: float(np.mean(u) - np.mean(v)), block=8.0, reps=300, level=0.95, rng=rng)
     assert (point, lo, hi) == (0.0, 0.0, 0.0)
 
 
@@ -368,9 +368,7 @@ def _trade_frame(rng: np.random.Generator, *, clusters: int, per_cluster: int) -
 def test_cluster_bootstrap_resamples_whole_entry_date_cohorts() -> None:
     rng = np.random.default_rng(47)
     frame = _trade_frame(rng, clusters=25, per_cluster=8)
-    point, lo, hi = cluster_bootstrap_ci(
-        frame, "entry_session", lambda f: float(f["pnl"].mean()), reps=400, level=0.95, rng=rng
-    )
+    point, lo, hi = cluster_bootstrap_ci(frame, "entry_session", lambda f: float(f["pnl"].mean()), reps=400, level=0.95, rng=rng)
     assert point == pytest.approx(float(frame["pnl"].mean()))
     assert lo < point < hi
     # the cluster interval must be far wider than a naive i.i.d. one: 200 trades, but only 25 independent cohorts

@@ -698,7 +698,7 @@ def test_references_are_read_from_the_ppm_columns_when_the_float_columns_are_abs
     rng = np.random.default_rng(133)
     events = _events_frame(rng, n_sessions=3, start=0, p_forecast=0.12)
     ppm = events.drop(columns=["p_implied"])
-    ppm["p_implied_ppm"] = [int(round(v * 1_000_000)) for v in events["p_implied"]]
+    ppm["p_implied_ppm"] = [round(float(v) * 1_000_000) for v in events["p_implied"]]
     assert cal.base_rate_in_sample(ppm).tolist() == pytest.approx(cal.base_rate_in_sample(events).tolist())
     refs = cal.build_references(ppm, None, recal_min_events=250, base_rate_min_events=250, refit_sessions=21)
     assert refs["raw_implied"].tolist() == pytest.approx(list(events["p_implied"]))
@@ -726,9 +726,7 @@ def _joint_test(events: pd.DataFrame, refs: dict[str, np.ndarray], look: pd.Inde
     bounds: dict[str, float] = {}
     for name in ("implied_recalibrated", "base_rate_expanding"):
         d = cal.loss_differential(refs[name][keep], p, y, sessions, questions)
-        bounds[name] = lower_bound(
-            d, alpha=alpha, block=10.0, reps=2000, rng=np.random.default_rng(2026), interval="percentile"
-        )
+        bounds[name] = lower_bound(d, alpha=alpha, block=10.0, reps=2000, rng=np.random.default_rng(2026), interval="percentile")
     return bounds
 
 
