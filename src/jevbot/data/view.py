@@ -152,7 +152,7 @@ class DataView:
         chain = self._chains.get_chain(underlying, self._key)
         if chain is None:
             raise DataUnavailable(f"no chain snapshot for {underlying} at {self._key.session} {self._key.slot.value}")
-        if chain.knowable_at > self._as_of:
+        if chain.knowable_at > self._as_of:  # INV-14
             raise PitViolation(
                 f"chain {underlying} {self._key.session} {self._key.slot.value} is knowable at "
                 f"{chain.knowable_at.isoformat()} > as_of {self._as_of.isoformat()}"

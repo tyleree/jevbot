@@ -1,6 +1,6 @@
 """`features.py` (DESIGN.md 5.3): hand-computed goldens, session-indexed windows, robust IV rank, trading-time moves.
 
-The fixture world is built here, not generated: 260 sessions whose closes are a GEOMETRIC series with a constant log
+The fixture world is built here, not generated: 300 sessions whose closes are a GEOMETRIC series with a constant log
 return `K`, so every 5.3 formula has a closed form that this file computes independently of `features.py`:
 
     rv20 = sqrt(252) * K            sigma_d = K            trend_z = |20K| / (K * sqrt(20)) = sqrt(20)
@@ -22,6 +22,7 @@ from jevbot.cal import XnysCalendar, trading_time, year_fraction
 from jevbot.config import DataConfig
 from jevbot.errors import InvariantError
 from jevbot.features import (
+    CLOSES_LOOKBACK,
     FeatureSet,
     compute_features,
     expected_move,
@@ -33,7 +34,7 @@ from jevbot.types import Fidelity, Slot, SnapshotKey
 from tests.fixtures.chain_factory import DEFAULT_SESSION, make_chain
 from tests.fixtures.fake_view import BARS_COLUMNS, DAILY_COLUMNS, FakeView, fomc_event
 
-N_SESSIONS: Final = 260
+N_SESSIONS: Final = 300  # the 300-close fixture of 15.1
 K: Final = 0.002  # constant daily log return of the generated closes
 REF: Final = 45_000  # today's reference price in cents
 ATM_IV_BP: Final = 1600
@@ -54,6 +55,12 @@ def _fidelity(slot: Slot) -> Fidelity:
 def _closes(n: int = N_SESSIONS) -> list[int]:
     """`closes[-1] == REF`; every step is exactly `K` in log terms (up to the cent rounding)."""
     return [round(REF * math.exp(K * (index - (n - 1)))) for index in range(n)]
+
+
+def _series() -> list[int]:
+    """What `compute_features` sees: the last `CLOSES_LOOKBACK` completed closes, then `ref` (5.3)."""
+    closes = _closes()
+    return [*closes[:-1][-CLOSES_LOOKBACK:], REF]
 
 
 def _atm_term(calendar: XnysCalendar, as_of: datetime, session: date, horizons: tuple[int, ...] = (5, 10, 20)) -> list[list[float]]:
@@ -194,15 +201,15 @@ def features(world: FakeView) -> FeatureSet:
 # ======================================================================================================================
 
 
-def test_the_series_is_completed_closes_plus_ref(world: FakeView, features: FeatureSet) -> None:
-    closes = list(world.closes("SPY", 260))
-    assert len(closes) == N_SESSIONS - 1  # today's own close is NOT a completed session
-    assert features.n_closes == N_SESSIONS and features.ref == REF
-    assert closes[-1] == _closes()[-2]
+def test_the_series_is_the_last_260_completed_closes_plus_ref(world: FakeView, features: FeatureSet) -> None:
+    closes = list(world.closes("SPY", CLOSES_LOOKBACK))
+    assert len(closes) == CLOSES_LOOKBACK  # the 5.3 window, out of a longer history
+    assert features.n_closes == CLOSES_LOOKBACK + 1 and features.ref == REF
+    assert closes[-1] == _closes()[-2]  # today's own close is NOT a completed session
 
 
 def test_moving_averages_use_the_documented_windows(features: FeatureSet) -> None:
-    series = [*_closes()[:-1], REF]
+    series = _series()
     assert features.ma20 == pytest.approx(sum(series[-20:]) / 20)
     assert features.ma50 == pytest.approx(sum(series[-50:]) / 50)
     assert features.ma20_prev == pytest.approx(sum(series[-25:-5]) / 20)  # the 20 closes ending 5 sessions ago
@@ -217,14 +224,14 @@ def test_realised_vol_trend_and_move_match_their_closed_forms(features: FeatureS
     assert features.move_sigma == pytest.approx((math.exp(K) - 1.0) / K, rel=2e-3)
     assert features.rv_change == pytest.approx(1.0, rel=5e-3)
     assert features.dd_52w == pytest.approx(0.0, abs=1e-9)  # today IS the 1-year high
-    assert features.streak == N_SESSIONS - 1  # every close is higher than the one before
+    assert features.streak == CLOSES_LOOKBACK  # every close in the window is higher than the one before
 
 
 def test_atr_gap_and_distance_are_hand_computable(features: FeatureSet) -> None:
     # every bar has high = 1.005 c, low = 0.995 c, so the true range is exactly 1% of the bar's own close
     assert features.atr_pct == pytest.approx(0.01, rel=1e-3)
     assert features.atr == pytest.approx(0.01 * REF, rel=1e-3)
-    series = [*_closes()[:-1], REF]
+    series = _series()
     ma20 = sum(series[-20:]) / 20
     assert features.dist_ma20_atr == pytest.approx((REF - ma20) / (0.01 * REF), rel=2e-3)
     assert features.gap_sigma == pytest.approx(0.001 / K, rel=2e-3)  # today's open is 1.001 x the prior close
