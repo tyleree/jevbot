@@ -117,7 +117,7 @@ _QUOTES: Final = str.maketrans(
     }
 )
 _DELETED_CATEGORIES: Final[frozenset[str]] = frozenset({"Cc", "Cf", "Co", "Cs", "Cn"})
-_BRACKETS: Final = str.maketrans({char: " " for char in "`{}[]<>|\\"})
+_BRACKETS: Final = str.maketrans(dict.fromkeys("`{}[]<>|\\", " "))
 _URL_RE: Final = re.compile(r"(?:https?://\S+|www\.\S+)", re.IGNORECASE)
 _EMAIL_RE: Final = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _HANDLE_RE: Final = re.compile(r"(?<![\w.])@\w+")

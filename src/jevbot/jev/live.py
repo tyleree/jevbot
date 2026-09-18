@@ -33,7 +33,7 @@ import threading
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import msgspec
 
@@ -56,6 +56,7 @@ from jevbot.types import CachedAnswer, CacheMode, DecisionRequest, DecisionResul
 
 if TYPE_CHECKING:  # the SDK is imported lazily inside __init__ (INV-18), so its types are only names here
     import httpx2
+    from typesafe_sdk import Question
 
 __all__ = ["LIVE_NAME", "REQUEST_ID_HEADER", "LiveJev"]
 
@@ -196,7 +197,9 @@ class LiveJev:
             self._tokens.acquire(estimate)
             started = time.monotonic()
             try:
-                resp = self._client.system_one(req.state, req.questions, model=self.cfg.model)
+                # the raw-dict question form the SDK accepts (`normalize_questions` keeps our insertion order)
+                questions = cast("Mapping[str, Question]", req.questions)
+                resp = self._client.system_one(req.state, questions, model=self.cfg.model)
             except BaseException as exc:
                 self.spend.commit(reservation, estimate, estimated=True)  # conservative: assume the attempt was billed
                 mapped, retryable, retry_after_ms = self._errors.map(exc)
@@ -245,7 +248,7 @@ class LiveJev:
     def _log_failure(self, req: DecisionRequest, attempt: int, mapped: DeciderError, exc: BaseException) -> None:
         """Log the exception CLASS, the status and the request id - never a body, never a header, never the state."""
         status = getattr(exc, "status", None)
-        headers = getattr(exc, "headers", None)
+        headers: Any = getattr(exc, "headers", None)
         request_id = headers.get(REQUEST_ID_HEADER) if hasattr(headers, "get") else None
         if status == 422:
             self._remember_detail(exc)

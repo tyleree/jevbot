@@ -166,6 +166,28 @@ FIT_PASS: Final[Mapping[str, float]] = {
 }
 
 
+# a set that clears every gate but scores below `rules.min_score`: regimefit 0.45, fit 0.50, calm 0.0
+WEAK_REGIME: Final[Mapping[str, float]] = {
+    "trending_up_calm": 0.40,
+    "trending_up_volatile": 0.05,
+    "range_bound_calm": 0.35,
+    "range_bound_volatile": 0.10,
+    "orderly_downtrend": 0.05,
+    "disorderly_selloff": 0.03,
+    "unclear_or_transition": 0.02,
+}
+WEAK_FIT: Final[Mapping[str, float]] = {
+    "put_credit_spread": 0.50,
+    "iron_condor": 0.30,
+    "call_debit_spread": 0.04,
+    "long_call": 0.04,
+    "call_credit_spread": 0.04,
+    "put_debit_spread": 0.04,
+    "long_put": 0.02,
+    "no_trade": 0.02,
+}
+
+
 def core_answers(**overrides: Answer) -> dict[str, Answer]:
     """The passing text-free entry answers; any question can be replaced by keyword (dots written as underscores)."""
     answers: dict[str, Answer] = {
@@ -366,7 +388,16 @@ def _no_trade_steps() -> list[tuple[str, dict[str, Any], dict[str, Any], str]]:
         ),
         ("step8 veto vol.explained_by_event hard", {"vol__explained_by_event": noul(0.706)}, {}, "veto:vol.explained_by_event:hard"),
         ("step8 veto vol.explained_by_event uncertain", {"vol__explained_by_event": noul(0.50)}, {}, "veto:vol.explained_by_event:uncertain"),
-        ("step9 score below min", {"under__stretched": noul(0.99)}, {}, "score:below_min"),
+        (
+            "step9 score below min",
+            {
+                "regime__market": choice("regime.market", WEAK_REGIME),
+                "fit__structure_family": choice("fit.structure_family", WEAK_FIT),
+                "under__stretched": noul(1.0),
+            },
+            {},
+            "score:below_min",
+        ),
         ("step10 tier zero env", {"risk__environment": score((0.0, 0.0, 0.0, 1.0))}, {}, "tier:zero:env"),
     ]
 
@@ -619,43 +650,60 @@ def test_score_tier_lookup(stretched: float, expected_core: int, expected_tier: 
     assert decision.tier_ppm == expected_tier
 
 
+def sharp_core(**overrides: Answer) -> dict[str, Answer]:
+    """A set whose score tier and peakedness tier are both 1.0, so the environment tier alone decides `tier_ppm`.
+
+    S_core = .30*.85 + .20*.82 + .20*.90 + .15*(.90 + 0.1/6) + .15*1.0 = .255 + .164 + .18 + .1375 + .15 = 0.8865
+    """
+    base: dict[str, Answer] = {
+        "under__direction": choice("under.direction", {"bullish": 0.85, "bearish": 0.05, "neutral_range": 0.05, "conflicting_signals": 0.05}),
+        "vol__stance": choice("vol.stance", {"sell_premium": 0.82, "buy_premium": 0.06, "limit_vol_exposure": 0.06, "unclear": 0.06}),
+        "under__stretched": noul(0.0),
+        "fit__structure_family": choice("fit.structure_family", _peaked(vocab.CHOICE_LABELS["fit.structure_family"], "put_credit_spread", 0.90)),
+        "regime__market": choice("regime.market", _peaked(vocab.CHOICE_LABELS["regime.market"], "trending_up_calm", 0.90)),
+    }
+    base.update(overrides)
+    return core_answers(**base)
+
+
 def test_peakedness_tier_is_the_minimum_of_the_two_gate_peaks() -> None:
-    sharper = core_answers(
-        under__direction=choice("under.direction", {"bullish": 0.85, "bearish": 0.05, "neutral_range": 0.05, "conflicting_signals": 0.05}),
-        vol__stance=choice("vol.stance", {"sell_premium": 0.82, "buy_premium": 0.06, "limit_vol_exposure": 0.06, "unclear": 0.06}),
-        under__stretched=noul(0.0),
-        fit__structure_family=choice("fit.structure_family", _peaked(vocab.CHOICE_LABELS["fit.structure_family"], "put_credit_spread", 0.90)),
-        regime__market=choice("regime.market", _peaked(vocab.CHOICE_LABELS["regime.market"], "trending_up_calm", 0.90)),
+    decision = decide(rules(), sharp_core(), facts())
+    assert decision.score_core_ppm == 886_500
+    assert decision.tier_ppm == 1_000_000  # tier_S 1.0, min(p_top) = 0.82 >= 0.805 -> tier_peak 1.0, env level 0 -> 1.0
+    softer = sharp_core(
+        vol__stance=choice("vol.stance", {"sell_premium": 0.80, "buy_premium": 0.08, "limit_vol_exposure": 0.06, "unclear": 0.06})
     )
-    # S_core = .30*.85 + .20*.82 + .20*.90 + .15*(.90 + 1/60) + .15*1.0 = .255+.164+.18+.1375+.15 = 0.8865 -> tier_S 1.0
-    # min(p_top) = 0.82 >= 0.805 -> tier_peak 1.0; env level 0 -> 1.0
-    decision = decide(rules(), sharper, facts())
-    assert decision.tier_ppm == 1_000_000
-    softer = decide(rules(), {**sharper, "vol.stance": choice("vol.stance", {"sell_premium": 0.80, "buy_premium": 0.08, "limit_vol_exposure": 0.06, "unclear": 0.06})}, facts())
-    assert softer.tier_ppm == 750_000  # min(p_top) = 0.80 -> tier_peak 0.75
+    assert decide(rules(), softer, facts()).tier_ppm == 750_000  # min(p_top) = 0.80 -> tier_peak 0.75
+    blunter = sharp_core(
+        under__direction=choice("under.direction", {"bullish": 0.70, "bearish": 0.05, "neutral_range": 0.15, "conflicting_signals": 0.10})
+    )
+    assert decide(rules(), blunter, facts()).tier_ppm == 500_000  # min(p_top) = 0.70 -> tier_peak 0.5
 
 
 @pytest.mark.parametrize(
     ("weights", "expected_level", "expected_tier_ppm"),
     [
-        ((1.0, 0.0, 0.0, 0.0), 0, 500_000),  # mean 0, top 0 -> level 0 -> 1.0, capped by tier_peak 0.5
-        ((0.0, 1.0, 0.0, 0.0), 1, 500_000),  # level 1 -> 0.75, capped by tier_peak 0.5
-        ((0.0, 0.0, 1.0, 0.0), 2, 500_000),  # level 2 -> 0.5
-        ((0.0, 0.0, 0.0, 1.0), 3, 0),  # level 3 -> 0.0
-        ((0.5, 0.0, 0.0, 0.5), 3, 0),  # mean 1.5 -> round_half_up 2, top 3 -> max = 3 (conservative)
-        ((0.6, 0.0, 0.0, 0.4), 3, 0),  # mean 1.2 -> 1, top 3 -> 3
+        ((1.0, 0.0, 0.0, 0.0), 0, 1_000_000),  # mean 0, top 0 -> level 0 -> tier_env 1.0
+        ((0.0, 1.0, 0.0, 0.0), 1, 750_000),
+        ((0.0, 0.0, 1.0, 0.0), 2, 500_000),
+        ((0.0, 0.0, 0.0, 1.0), 3, 0),
+        ((0.45, 0.0, 0.0, 0.55), 3, 0),  # mean 1.65 -> round_half_up 2, top 3 -> max = 3: the TOP is the conservative one
+        ((0.0, 0.34, 0.33, 0.33), 2, 500_000),  # mean 1.99 -> 2, top 1 -> max = 2: here the MEAN is
     ],
 )
 def test_environment_tier_is_conservative(weights: tuple[float, ...], expected_level: int, expected_tier_ppm: int) -> None:
-    decision = decide(rules(), core_answers(risk__environment=score(weights)), facts())
+    """7.6: `env_level = max(round_half_up(mean), top)`, so neither a hostile mean nor a hostile mode can be averaged away."""
+    decision = decide(rules(), sharp_core(risk__environment=score(weights)), facts())
     assert decision.tier_ppm == expected_tier_ppm
+    assert decision.tier_ppm == round(RulesTiers().environment[expected_level] * 1_000_000)
     if expected_tier_ppm == 0:
-        assert "tier:zero:env" in decision.reasons
-    assert expected_level in range(4)
+        assert "tier:zero:env" in decision.reasons and decision.action == "no_trade"
+    else:
+        assert decision.action == "enter"
 
 
 def test_an_out_of_band_environment_score_reads_as_the_hostile_level() -> None:
-    decision = decide(rules(), core_answers(risk__environment=score((1.0, 0.0, 0.0, 0.0), raw_sum=0.90)), facts())
+    decision = decide(rules(), sharp_core(risk__environment=score((1.0, 0.0, 0.0, 0.0), raw_sum=0.90)), facts())
     assert decision.tier_ppm == 0 and "tier:zero:env" in decision.reasons
 
 
@@ -726,7 +774,7 @@ def test_an_errored_variant_counts_as_disagreement() -> None:
 
 def test_confirm_entry_leaves_a_no_trade_base_untouched() -> None:
     engine = rules()
-    base = decide(engine, core_answers(under__stretched=noul(0.99)), facts())
+    base = decide(engine, core_answers(regime__market=choice("regime.market", {"disorderly_selloff": 0.8, "trending_up_calm": 0.2})), facts())
     assert base.action == "no_trade"
     assert engine.confirm_entry(base, {Variant.OPT_PERM: result(core_answers(), variant=Variant.OPT_PERM)}, None, facts()) is base
 

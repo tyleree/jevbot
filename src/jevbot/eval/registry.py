@@ -58,6 +58,7 @@ __all__ = [
     "git_head",
     "git_path_committed",
     "installed_sdk_version",
+    "run_git",
     "is_selection_trial",
     "load_scan_facts",
     "scan_facts_problems",
@@ -362,7 +363,7 @@ def installed_sdk_version() -> str:
 Runner = Callable[[Sequence[str], Path], "subprocess.CompletedProcess[str]"]
 
 
-def _run_git(args: Sequence[str], cwd: Path) -> "subprocess.CompletedProcess[str]":
+def run_git(args: Sequence[str], cwd: Path) -> "subprocess.CompletedProcess[str]":
     return subprocess.run(  # fixed argv, no shell
         ["git", *args],
         cwd=str(cwd),
@@ -373,7 +374,7 @@ def _run_git(args: Sequence[str], cwd: Path) -> "subprocess.CompletedProcess[str
     )
 
 
-def git_head(repo_root: Path, *, runner: Runner = _run_git) -> tuple[str | None, bool]:
+def git_head(repo_root: Path, *, runner: Runner = run_git) -> tuple[str | None, bool]:
     """`(commit, dirty)` of the working tree at `repo_root`; `(None, True)` when it is not a git repository.
 
     A tree that git cannot describe is treated as dirty: the report's `UNREPRODUCIBLE (dirty git tree)` flag must never
@@ -388,7 +389,7 @@ def git_head(repo_root: Path, *, runner: Runner = _run_git) -> tuple[str | None,
     return head.stdout.strip() or None, bool(status.stdout.strip())
 
 
-def git_path_committed(path: Path, repo_root: Path, *, runner: Runner = _run_git) -> bool:
+def git_path_committed(path: Path, repo_root: Path, *, runner: Runner = run_git) -> bool:
     """True iff `path` is tracked by git AND has no staged or unstaged modification (section 14: `eval prereg register`
     refuses an uncommitted pre-registration file - a registered hash must point at something a reader can check out)."""
     try:

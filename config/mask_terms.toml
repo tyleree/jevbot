@@ -1,0 +1,189 @@
+# jevbot - news entity masking dictionaries (DESIGN.md 5.8, loaded by config.load_mask_terms).
+#
+# Every listed term is replaced, longest first, case-insensitively and word-bounded, by its group's `replacement`
+# phrase. The generic patterns of 5.8 step 4a (titled people, exchange-qualified tickers, `$TICKER` cashtags, the
+# item's own symbols) use the same phrases. Countries and regions are deliberately NOT listed: they carry meaning and
+# leak nothing (G9 - informative institutional tokens are generalised, not deleted). Dates, numbers, percentages and
+# residual proper nouns are handled by rules, not by this file.
+#
+# Editing this file changes `mask_version` (= sha256(config.MASK_RULES_VERSION + these bytes)[:12]) and therefore
+# `state_config_hash`, so a run recorded under the old dictionary is never silently mixed with a new one.
+#
+# Rules the loader enforces: only the eight groups below, a non-empty `terms` array per group, and no term listed
+# twice (case-insensitively, within or across groups - the replacement would be ambiguous).
+
+[funds]
+replacement = "the fund"
+terms = [
+  "SPDR S&P 500 ETF Trust",
+  "SPDR S&P 500 ETF",
+  "SPDR S&P 500",
+  "SPY",
+  "Invesco QQQ Trust",
+  "Invesco QQQ",
+  "QQQ",
+  "iShares Russell 2000 ETF",
+  "iShares Russell 2000",
+  "IWM",
+  "State Street Global Advisors",
+  "SPDR",
+  "iShares",
+]
+
+[indices]
+replacement = "a major equity index"
+terms = [
+  "S&P 500 Index",
+  "S&P 500",
+  "S&P500",
+  "SPX",
+  "Nasdaq 100",
+  "Nasdaq Composite",
+  "Nasdaq",
+  "NDX",
+  "Dow Jones Industrial Average",
+  "Dow Jones",
+  "DJIA",
+  "Russell 2000",
+  "Russell 1000",
+  "RUT",
+  "Cboe Volatility Index",
+  "VIX",
+  "MSCI World",
+  "Stoxx 600",
+  "Nikkei 225",
+]
+
+[central_banks]
+replacement = "the central bank"
+terms = [
+  "Federal Open Market Committee",
+  "Federal Reserve Board",
+  "Federal Reserve",
+  "FOMC",
+  "the Fed",
+  "Fed",
+  "European Central Bank",
+  "ECB",
+  "Bank of Japan",
+  "BoJ",
+  "Bank of England",
+  "BoE",
+  "People's Bank of China",
+  "PBOC",
+  "Swiss National Bank",
+]
+
+[agencies]
+replacement = "a government agency"
+# `Treasury` is listed only in its qualified forms: the bare word carries market meaning ("Treasury yields") and
+# leaks nothing, while the institution is always named in full.
+terms = [
+  "Bureau of Labor Statistics",
+  "BLS",
+  "Bureau of Economic Analysis",
+  "Treasury Department",
+  "U.S. Treasury",
+  "US Treasury",
+  "Securities and Exchange Commission",
+  "SEC",
+  "Congressional Budget Office",
+  "Department of Labor",
+  "Commerce Department",
+  "White House",
+  "Internal Revenue Service",
+  "IRS",
+  "Commodity Futures Trading Commission",
+  "CFTC",
+]
+
+[releases]
+replacement = "a major economic data release"
+terms = [
+  "Consumer Price Index",
+  "CPI",
+  "Producer Price Index",
+  "PPI",
+  "nonfarm payrolls",
+  "non-farm payrolls",
+  "jobs report",
+  "employment report",
+  "payrolls report",
+  "initial jobless claims",
+  "jobless claims",
+  "personal consumption expenditures",
+  "PCE",
+  "retail sales report",
+  "durable goods orders",
+  "housing starts",
+  "consumer confidence index",
+  "ISM manufacturing",
+  "University of Michigan sentiment",
+]
+
+[people]
+replacement = "a senior official"
+terms = [
+  "Jerome Powell",
+  "Powell",
+  "Janet Yellen",
+  "Yellen",
+  "Ben Bernanke",
+  "Bernanke",
+  "Christine Lagarde",
+  "Lagarde",
+  "Kazuo Ueda",
+  "Andrew Bailey",
+  "Joe Biden",
+  "Biden",
+  "Donald Trump",
+  "Trump",
+]
+
+[companies]
+replacement = "a large company"
+terms = [
+  "Berkshire Hathaway",
+  "Goldman Sachs",
+  "JPMorgan Chase",
+  "JPMorgan",
+  "BlackRock",
+  "Vanguard",
+  "Apple",
+  "Microsoft",
+  "Nvidia",
+  "Amazon",
+  "Alphabet",
+  "Google",
+  "Tesla",
+  "Broadcom",
+  "Netflix",
+  "Exxon Mobil",
+  "Walmart",
+  "Eli Lilly",
+  "UnitedHealth",
+  "Mastercard",
+  "Micron",
+  "Boeing",
+  "General Motors",
+]
+
+[geo_events]
+replacement = "a major event"
+terms = [
+  "Russia-Ukraine war",
+  "war in Ukraine",
+  "Ukraine war",
+  "Gaza war",
+  "Middle East conflict",
+  "Hurricane Katrina",
+  "Hurricane Sandy",
+  "Hurricane Ian",
+  "COVID-19",
+  "COVID",
+  "coronavirus pandemic",
+  "global financial crisis",
+  "debt ceiling crisis",
+  "Brexit",
+  "Arab Spring",
+]
