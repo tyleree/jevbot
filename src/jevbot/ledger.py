@@ -20,14 +20,21 @@ fill claims, content-addressed states and meta (DESIGN.md 2.7, 2.11, 3.4, 13.4; 
   (`InvariantError`); `meta` keys are write-once. Outcomes and calibration are VIEWS over the ledger (SQLite JSON1); a
   forecast with a NULL `p_ppm` is a MISSING forecast and is never filtered out.
 
-`verify(from_seq)` is the incremental check every cycle runs; the highest verified seq is kept in the `last_verified_seq`
-meta row by this module itself (that row is bookkeeping, not run data, so `set_meta` refuses it).
+`verify(from_seq)` is the incremental check every cycle runs (9.6 R5: full at startup, incremental afterwards). The highest
+verified seq is kept in the `last_verified_seq` meta row (13.4), which this store maintains inside `verify()` itself -
+best effort, because 3.4 specifies `verify()` as a READ ("recompute the chain; raises LedgerCorrupt"): a marker that cannot
+be written never fails a successful verification. `get_meta(LAST_VERIFIED_SEQ)` is the PORTABLE read of that high-water
+mark, and it is the one meta key that is not write-once, so a consumer typed against the `Ledger` Protocol can maintain it
+through `set_meta` for an implementation that does not maintain it itself.
+
+Every `sqlite3.Error` that escapes the driver here - a locked, read-only or damaged store - is re-raised as `LedgerCorrupt`,
+so the documented exception type of 3.4 and its exit code 9 (2.9) hold instead of a generic exit 1.
 """
 
 import json
 import sqlite3
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -51,7 +58,7 @@ __all__ = [
 CommitMode = Literal["per_session", "per_append"]
 _MODES: Final[frozenset[str]] = frozenset({"per_session", "per_append"})
 
-LAST_VERIFIED_SEQ: Final = "last_verified_seq"  # 13.4 meta row, maintained by verify() (write-once `set_meta` refuses it)
+LAST_VERIFIED_SEQ: Final = "last_verified_seq"  # 13.4 meta row: the high-water mark of verify(); the one rewritable meta key
 _PAGE: Final = 512  # rows per query in the streaming walks (entries / verify): a 10-year run never lands in memory at once
 _SCHEMA_VERSION: Final = 1
 
@@ -130,6 +137,47 @@ _SIDECAR_WALL_KEYS: Final[tuple[str, ...]] = ("wall_created_at", "ledgered_wall"
 _SIDECAR_COLUMN_KEYS: Final[frozenset[str]] = frozenset({*_SIDECAR_WALL_KEYS, "provenance", "diagnostics"})
 
 
+# Every object the 13.4 schema defines, by name: when a store already carries all of them the schema is not re-applied, so
+# opening a finished run store to READ it (the reports, baseline 6's states) writes nothing at all.
+_SCHEMA_OBJECTS: Final[frozenset[str]] = frozenset(
+    {
+        "ledger",
+        "sidecar",
+        "fill_ids",
+        "states",
+        "state_index",
+        "meta",
+        "ledger_kind_session",
+        "ledger_no_update",
+        "ledger_no_delete",
+        *VIEW_COLUMNS,
+    }
+)
+
+
+def _mkdir_700(directory: Path) -> None:
+    """Create `directory` and every ancestor that is missing, each with mode 0700 (13.1 / D1: the data tree is mode 700).
+
+    `Path.mkdir(parents=True, mode=0o700)` applies the mode to the LEAF only - `pathlib` creates the intermediate parents
+    with the default mode - so the missing ancestors are walked here and each one this call creates is `chmod`ed as well
+    (the `mkdir` mode argument is masked by the process umask, which could otherwise take bits away). Directories that
+    already exist are never touched.
+    """
+    missing: list[Path] = []
+    probe = directory
+    while not probe.exists():
+        missing.append(probe)
+        if probe.parent == probe:  # the filesystem root: nothing above it to create
+            break
+        probe = probe.parent
+    for path in reversed(missing):
+        path.mkdir(mode=0o700, exist_ok=True)
+        try:
+            path.chmod(0o700)
+        except OSError:  # a filesystem without POSIX modes: the directory exists, which is what the store needs
+            pass
+
+
 def _json(value: object) -> str:
     """Sidecar JSON: `msgspec` encoding, so floats, datetimes and Structs are welcome (nothing here is hashed)."""
     return msgspec.json.encode(value).decode("utf-8")
@@ -180,14 +228,18 @@ class SqliteLedger:
             store = Path(path)
         else:
             raise TypeError(f"path must be a Path or str, got {type(path).__name__}")
-        store.parent.mkdir(parents=True, exist_ok=True, mode=0o700)  # $JEVBOT_DATA is mode 700 (D1); a missing run dir is created
+        _mkdir_700(store.parent)  # $JEVBOT_DATA is mode 700 (D1); every missing run directory is created with that mode
         self.path: Final = store
         self.commit_mode: CommitMode = commit_mode
         self.commits = 0  # how many commit() calls happened (the per-session tests assert one per session)
         self._lock = threading.RLock()
         self._closed = False
         self._uncommitted = 0
-        self._conn = sqlite3.connect(store, isolation_level=None, check_same_thread=False)
+        try:
+            self._conn = sqlite3.connect(store, isolation_level=None, check_same_thread=False)
+        except sqlite3.Error as exc:
+            self._closed = True
+            raise LedgerCorrupt(f"{store}: the run store could not be opened ({type(exc).__name__}: {exc})") from exc
         try:
             self._configure()
             self._seq, self._hash = self._read_head()
@@ -196,37 +248,65 @@ class SqliteLedger:
             self._closed = True
             raise
 
+    # --- the driver seam: every statement, and every failure type, goes through here ------------------------------------
+
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
+        """Run one statement. A `sqlite3.Error` (locked, read-only, damaged store) becomes `LedgerCorrupt`: 3.4 documents
+        that type for this store and 2.9 maps it to exit code 9, where a raw driver error would map to the generic 1."""
+        try:
+            return self._conn.execute(sql, params)
+        except sqlite3.Error as exc:
+            verb = sql.split(maxsplit=1)[0].upper()
+            raise LedgerCorrupt(f"{self.path}: {verb} failed ({type(exc).__name__}: {exc})") from exc
+
+    def _commit_conn(self) -> None:
+        try:
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            raise LedgerCorrupt(f"{self.path}: COMMIT failed ({type(exc).__name__}: {exc})") from exc
+
+    def _rollback_conn(self) -> None:
+        try:
+            self._conn.rollback()
+        except sqlite3.Error as exc:
+            raise LedgerCorrupt(f"{self.path}: ROLLBACK failed ({type(exc).__name__}: {exc})") from exc
+
     # --- construction -------------------------------------------------------------------------------------------------
 
     def _configure(self) -> None:
         """13.4: WAL + `synchronous=FULL`; foreign keys on; then the schema (idempotent) and a shape check.
 
-        A file that is not a run store of this schema is refused before anything is written to it."""
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=FULL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        if self._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ledger'").fetchone():
+        A file that is not a run store of this schema is refused before anything is written to it. A store that already
+        carries every object of 13.4 is left exactly as it is: opening a finished run store only to READ it (the reports,
+        baseline 6's `get_states`, an incremental `verify`) writes nothing.
+        """
+        self._execute("PRAGMA journal_mode=WAL")
+        self._execute("PRAGMA synchronous=FULL")
+        self._execute("PRAGMA foreign_keys=ON")
+        self._execute("PRAGMA busy_timeout=5000")
+        present = {str(row[0]) for row in self._execute("SELECT name FROM sqlite_master")}
+        if "ledger" in present:
             self._check_ledger_shape()
-        try:
-            self._conn.executescript(SCHEMA_SQL)
-        except sqlite3.DatabaseError as exc:
-            raise LedgerCorrupt(f"{self.path}: the run store schema of 13.4 could not be applied ({exc})") from exc
-        self._conn.commit()
-        self._check_ledger_shape()
-        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        if not _SCHEMA_OBJECTS <= present:
+            try:
+                self._conn.executescript(SCHEMA_SQL)
+            except sqlite3.Error as exc:
+                raise LedgerCorrupt(f"{self.path}: the run store schema of 13.4 could not be applied ({exc})") from exc
+            self._commit_conn()
+            self._check_ledger_shape()
+        version = int(self._execute("PRAGMA user_version").fetchone()[0])
         if version == 0:
-            self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+            self._execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
         elif version != _SCHEMA_VERSION:
             raise LedgerCorrupt(f"{self.path}: run store schema version {version}, this build writes {_SCHEMA_VERSION}")
 
     def _check_ledger_shape(self) -> None:
-        columns = tuple(str(row[1]) for row in self._conn.execute("PRAGMA table_info(ledger)"))
+        columns = tuple(str(row[1]) for row in self._execute("PRAGMA table_info(ledger)"))
         if columns != _LEDGER_COLUMNS:
             raise LedgerCorrupt(f"{self.path}: `ledger` has columns {columns}, expected {_LEDGER_COLUMNS} (13.4)")
 
     def _read_head(self) -> tuple[int, str]:
-        row = self._conn.execute("SELECT seq, hash FROM ledger ORDER BY seq DESC LIMIT 1").fetchone()
+        row = self._execute("SELECT seq, hash FROM ledger ORDER BY seq DESC LIMIT 1").fetchone()
         return (0, GENESIS_HASH) if row is None else (int(row[0]), str(row[1]))
 
     # --- transaction bookkeeping --------------------------------------------------------------------------------------

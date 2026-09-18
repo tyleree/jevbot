@@ -33,6 +33,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
+import msgspec
+
 from jevbot import canon, config, vocab
 from jevbot import questions as questions_module
 from jevbot.config import Config
@@ -692,8 +694,6 @@ def record_path(data_dir: Path, record: ProbeRecord) -> Path:
 
 def write_record(data_dir: Path, record: ProbeRecord) -> Path:
     """Write the machine-readable probe record atomically; returns its path."""
-    import msgspec
-
     path = record_path(data_dir, record)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")

@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import pytest
 from typer.testing import CliRunner
 
@@ -325,3 +326,82 @@ def test_cache_stats_and_verify_commands(data_dir: Path) -> None:
     verified = _run(["verify"], data_dir, as_json=True)
     assert verified.exit_code == 0 and json.loads(verified.output)["ok"] is True
     assert _run(["verify"], data_dir).exit_code == 0
+
+
+# ======================================================================================================================
+# `CachedAnswer.answer_json`: the canonical spelling of one wire answer (2.5, `jev/common.py`)
+# ======================================================================================================================
+
+
+def test_dumps_answer_is_canonical_sorted_json_that_allows_probabilities() -> None:
+    from jevbot.jev.common import dumps_answer
+
+    wire = {"type": "choice", "probabilities": {"beta": 0.25, "alpha": 0.75}, "choice": "alpha", "confidence": 0.8}
+    text = dumps_answer(wire)
+    assert text == '{"choice":"alpha","confidence":0.8,"probabilities":{"alpha":0.75,"beta":0.25},"type":"choice"}'
+    assert dumps_answer({"probabilities": {"beta": 0.25, "alpha": 0.75}, **wire}) == text, "key order does not matter"
+    # canon.dumps_sorted refuses every float (nothing hashed into the LEDGER may be one); an answer IS probabilities
+    with pytest.raises(TypeError):
+        canon.dumps_sorted(wire)
+    assert dumps_answer({"type": "noul", "noul": 0}) == '{"noul":0,"type":"noul"}'
+    assert dumps_answer([1, "a", None, True]) == '[1,"a",null,true]'
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"type": "noul", "noul": float("nan")},
+        {"type": "noul", "noul": float("inf")},
+        {"type": "choice", "probabilities": {"a": float("-inf")}},
+    ],
+)
+def test_a_non_finite_probability_can_never_be_cached(answer: dict[str, Any]) -> None:
+    from jevbot.errors import DeciderResponseError
+    from jevbot.jev.common import dumps_answer
+
+    with pytest.raises(DeciderResponseError, match="non-finite"):
+        dumps_answer(answer)
+
+
+@pytest.mark.parametrize("answer", [{"type": b"noul"}, {1: "x"}, {"a": {1, 2}}, datetime(2026, 9, 17, tzinfo=UTC)])
+def test_a_non_json_answer_can_never_be_cached(answer: Any) -> None:
+    from jevbot.errors import DeciderResponseError
+    from jevbot.jev.common import dumps_answer
+
+    with pytest.raises(DeciderResponseError):
+        dumps_answer(answer)
+
+
+def test_result_from_rows_refuses_an_incomplete_or_corrupt_row_set(cache: SqliteDecisionCache) -> None:
+    from jevbot.errors import DeciderResponseError
+    from jevbot.jev.common import cache_keys_for, check_request_hashes, result_from_rows
+    from tests.fixtures.jev_transport import make_request
+
+    req = make_request()
+    keys = cache_keys_for(MODEL, req)
+    check_request_hashes(req)  # the request's own hashes are consistent
+    with pytest.raises(InvariantError, match="no cached row"):
+        result_from_rows(req, MODEL, keys, {}, source="cache")
+    rows, state_json, questions_json = make_rows()
+    put(cache, rows, state_json, questions_json)
+    stored = cache.get_many(NAMESPACE, [row.key for row in rows])
+    broken_key = rows[0].key
+    corrupt = dict(stored)
+    corrupt[broken_key] = CachedAnswer(
+        **{**{f: getattr(stored[broken_key], f) for f in stored[broken_key].__struct_fields__}, "answer_json": "not json"}
+    )
+    with pytest.raises(DeciderResponseError, match="not valid JSON"):
+        result_from_rows(req, MODEL, keys, corrupt, source="cache")
+
+
+def test_check_request_hashes_catches_a_builder_bug() -> None:
+    from jevbot.jev.common import check_request_hashes
+    from tests.fixtures.jev_transport import make_request
+
+    req = make_request()
+    bad_state = msgspec.structs.replace(req, state_hash="0" * 64)
+    with pytest.raises(InvariantError, match="state_hash"):
+        check_request_hashes(bad_state)
+    bad_questions = msgspec.structs.replace(req, question_set_hash="0" * 64)
+    with pytest.raises(InvariantError, match="question_set_hash"):
+        check_request_hashes(bad_questions)

@@ -227,7 +227,7 @@ def ingest(
                 status=state.status,
                 qty=state.qty,
                 filled_qty=state.filled_qty,
-                limit=None,
+                limit=None,  # a broker status report carries no limit; the attempt's limit is on its SUBMITTING entry
                 broker_order_id=state.broker_order_id,
                 reject_code=state.reject_code,
                 tag="",

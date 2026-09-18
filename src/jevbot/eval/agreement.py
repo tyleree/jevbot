@@ -150,6 +150,11 @@ def _read_entry_decisions(path: Path) -> dict[tuple[date, str], _EntryDecision]:
         underlying = rules.get("underlying") or payload.get("subject_alias")
         if not isinstance(underlying, str) or not underlying:
             raise EvalError(f"{path}: entry DECISION at seq {row['seq']} names no underlying")
+        # 12.9(a) is *about* `action`, and 2.6 makes it a non-optional field of `EntryDecision`: a payload without it is
+        # a malformed store, not a missing value.  Defaulting it to "" would let two malformed stores "agree".
+        action = rules.get("action")
+        if not isinstance(action, str) or not action:
+            raise EvalError(f"{path}: entry DECISION at seq {row['seq']} names no action")
         session = date.fromisoformat(str(row["session"]))
         kind = rules.get("kind")
         labels: dict[str, str] = {}
@@ -170,7 +175,7 @@ def _read_entry_decisions(path: Path) -> dict[tuple[date, str], _EntryDecision]:
         out[(session, underlying)] = _EntryDecision(
             session=session,
             underlying=underlying,
-            action=str(rules.get("action", "")),
+            action=action,
             kind=None if kind is None else str(kind),
             top_labels=labels,
         )

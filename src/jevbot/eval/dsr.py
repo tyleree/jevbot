@@ -13,7 +13,9 @@ computes `skew` and `kurt` itself from the daily return series (`m3 / m2^1.5`, `
 "excess" flavour.  `trial_results.kurt` (13.5) stores exactly this quantity.
 
 Guards (12.6): `N < 2` or an undefined / zero `Var(SR_n)` => `SR0 = 0`, `DSR = PSR(0)`, flagged `dsr_trials<2` (never
-`Z(0) = -inf`); a negative radicand or `SR <= SR_ref` => DSR / MinTRL reported as `n/a` (`None` here).
+`Z(0) = -inf`) - **one** flag string for both conditions, because the deflation is the same; the variance case adds
+`dsr_var_sr_undefined` beside it, never instead of it.  A negative radicand or `SR <= SR_ref` => DSR / MinTRL reported
+as `n/a` (`None` here).
 
 Scope of `N` (12.6) is the strategy-selection trial count and nothing else; `counts_as_selection_trial` is the pure
 predicate the trial registry applies to its rows.
@@ -243,9 +245,13 @@ def deflated_sharpe(
 
     usable = np.asarray([s for s in completed_sharpes if math.isfinite(s)], dtype=np.float64)
     var_sr = float(usable.var(ddof=1)) if usable.size >= 2 else float("nan")
-    if n_trials < 2:
+    # 12.6 names ONE flag for both guard conditions ("`N < 2` **or** an undefined / zero `Var(SR_n)` => `SR0 = 0`,
+    # DSR = PSR(0), flagged `dsr_trials<2`"): the statistic is deflated by `SR0 = 0` in either case, so a consumer
+    # keyed on the spec's flag string must see it in either case.  `dsr_var_sr_undefined` is extra detail beside it.
+    var_undefined = not math.isfinite(var_sr) or var_sr <= 0.0
+    if n_trials < 2 or var_undefined:
         flags.append("dsr_trials<2")
-    elif not math.isfinite(var_sr) or var_sr <= 0.0:
+    if n_trials >= 2 and var_undefined:
         flags.append("dsr_var_sr_undefined")
     deflator = sr0(var_sr, n_trials)
 

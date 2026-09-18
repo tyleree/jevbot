@@ -6,6 +6,11 @@ so a report re-run produces byte-identical intervals (12.5).
 
 Overlapping evaluation horizons (5-session outcomes) mean inference uses **block methods only**; the i.i.d. bootstrap
 (`block <= 1`) is deliberately reachable so that `eval power` can demonstrate it is over-sized (12.3).
+
+Every series handed to an interval here must be **finite**.  A session with no usable row (`loss_differential` yields
+`NaN` for it) is excluded and listed by the caller, per 12.1 `missing`; dropping the replicates that happen to draw it
+would take the bound over a selection-biased subset of the bootstrap distribution and would make the three
+pre-registered interval candidates disagree about whether the data are usable at all.
 """
 
 from __future__ import annotations
