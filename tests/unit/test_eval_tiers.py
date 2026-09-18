@@ -40,9 +40,7 @@ RELEASE = date(2026, 9, 15)
         (Fidelity.EOD_QUOTES, date(2026, 10, 1), RunMode.BACKTEST, True, EvidenceTier.B),
     ],
 )
-def test_evidence_tier_table(
-    fidelity: Fidelity, session: date, mode: RunMode, decided_live: bool, expected: EvidenceTier
-) -> None:
+def test_evidence_tier_table(fidelity: Fidelity, session: date, mode: RunMode, decided_live: bool, expected: EvidenceTier) -> None:
     assert (
         tiers.evidence_tier(
             fidelity=fidelity,
@@ -58,9 +56,7 @@ def test_evidence_tier_table(
 def test_decided_live_uses_the_log_delay_budget() -> None:
     as_of = datetime(2026, 10, 1, 19, 35, tzinfo=UTC)
     assert tiers.decided_live(as_of=as_of, ledgered_wall=as_of, max_log_delay_s=600)
-    assert tiers.decided_live(
-        as_of=as_of, ledgered_wall=as_of.replace(minute=45), max_log_delay_s=600
-    )  # 600 s exactly still counts
+    assert tiers.decided_live(as_of=as_of, ledgered_wall=as_of.replace(minute=45), max_log_delay_s=600)  # 600 s exactly still counts
     assert not tiers.decided_live(
         as_of=as_of, ledgered_wall=as_of.replace(minute=46), max_log_delay_s=600
     )  # 660 s: replayed after the fact

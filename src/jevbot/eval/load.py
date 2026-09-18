@@ -84,6 +84,7 @@ CALIBRATION_COLUMNS: Final[tuple[str, ...]] = (
     "resolve_on",
     "resolved_on",
     "y",
+    "resolved",
     "void",
     "div_in_window",
     "tier",
@@ -396,7 +397,10 @@ def calibration_frame(stores: StoreArg | Sequence[StoreArg], *, resolved_only: b
             if "y" not in joined.columns:
                 joined["y"] = pd.array([], dtype="Int64") if joined.empty else pd.NA
             joined["y"] = joined["y"].astype("Int64")
-            joined["void"] = joined["y"].isna()
+            # "resolved" = an OUTCOME entry exists; "void" = it exists and carries y = null (a data gap).
+            # Voids are reported, never dropped silently (2.7); an unresolved forecast is simply still open.
+            joined["resolved"] = joined["resolved_on"].notna() if "resolved_on" in joined.columns else False
+            joined["void"] = joined["resolved"] & joined["y"].isna()
             parts.append(joined)
         finally:
             if owned:

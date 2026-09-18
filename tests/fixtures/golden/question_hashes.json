@@ -1,0 +1,41 @@
+{
+  "question_sets": {
+    "entry.v1": "ce549009dbfa02141f7cabd58e56bb6f53d52ab4c200de5c65f21601e3869eec",
+    "entry_text.v1": "0b3b8c3333d2b927d0fad6d7bfeb1635b8ee202da0a1a1eacedbfeed56735bd4",
+    "manage.v1": "8cfdf313100b7a5bfe8ba4bb8a5271bfc592516d835830aebe18b4eb5630f87d",
+    "manage_text.v1": "d586ce51a4f714426d01817d0e69bbf3e2a6375bbc66813f883c7b681b470c23",
+    "probe.recall.v1": "d02ddc431ae847d7868b65677a351f8f2f9cac2368b3005cc5d4bceeed28aa8d"
+  },
+  "questions": {
+    "eval.down_1em_1s": "69d104a06c5df05e0c0506d7d722f7734a3eb9084afa1a4cf11a9345f69cd78d",
+    "eval.down_1em_5s": "c865ef63f9cfda8ee508f6b8e040654c6a3b31bc73fa6bc3b828b39c4ae98bdf",
+    "eval.down_1em_hold": "8b4934c3bafdd972ef7e1b339a40d107cf06d407f63aa17d6c53f10fabcbce5c",
+    "eval.inside_1em_1s": "48a98e0cf2eb123cd676bc67e3433ed6217a5d21973f1e148722fcaa81b81a72",
+    "eval.inside_1em_5s": "a882ac8d952ca2d79bdb1862343bbc7ab5bf633b9397d18b312a8ee2ec287a6e",
+    "eval.inside_1em_hold": "aefcd9201d727cc1848e48671f3edbb377005ffb9b20d6f51f36c475d372cdac",
+    "eval.rv_gt_iv_5s": "5fe22b83baf3d5ff6e4781a4f316878129abaffa037626b2bc92939c12d69c0d",
+    "eval.up_1em_1s": "a8eb7d42ad16cf12827193ed9a2c91940d6935cae7648aeee2d7eefa820e8c2a",
+    "eval.up_1em_5s": "181a395ac6871b14ba6e6db46751ffb2e079ce81104dfa9ddc674ddaae866136",
+    "eval.up_1em_hold": "1c92687d053da8e0dcc99d0f52bfb1f2013ca3baf356cb7cecd38a76e166c9f5",
+    "eval.up_1s": "92e91aec3ea28e29d2fb9c00790550b69544c0448e6f34c8ce3744391a72003d",
+    "eval.up_5s": "9f9f1d864e00de637498aaefaa3fc9e591663067b8aaf6d1222d08bfb0903a62",
+    "fit.structure_family": "bd780dc65b59d522f2cc5e31e3e7a246323ad674e23e9af90d7382c8e27a471c",
+    "pos.action": "2dfc33f1a6d18b529a0ecd03261bb668422c7476b36193c1803521edb5b1fd25",
+    "pos.adverse_news_since_entry": "975e052adce54dd5fd5254a5dbc095766c8875ff7e47d2fdb850cff9c39c7255",
+    "pos.pending_binary_since_entry": "ade5fb6701bf4bee5cf2229a3859bf7f38df1f2fbe16c41967efeddcdffb82bc",
+    "pos.short_strike_threat": "640cb117f2ddcb6b6d61090c138994976e58792e7e03c4a547f6650605257b67",
+    "pos.thesis_invalidated": "4fe2205d71bd7640e79f14f285eb7fafe934eb6a9a0c6db088e060802db8a4ac",
+    "probe.closed_higher_5s": "ad018efdaa1a43a0cdc474ad7b83c15a877350eeafb3c6cea7a8d1c342356568",
+    "regime.market": "07773277054aaf71b395fd3eaab20f816c042564e46c2a2558c2bd3cccc02a5d",
+    "risk.environment": "d8cab2091c3f2c63cabaa5414dfa240f098c6aedfdc9153bebe63a1dc9529547",
+    "text.clearly_negative": "ac0af52d8d368caeaff98f1bf01ded2c44a077621abbb3e3d68be6bd56044cf9",
+    "text.clearly_positive": "1d876828fb50bae3bd87dbb48effa44d7dc67bd16b29f4a2c1abd6636533cb3c",
+    "text.market_stress": "74765c5916d269bff2a4eb226b297bf2897002c5d475b61fbf9dd415ccbc978b",
+    "text.material_present": "873823580422c11d7522057eb15a61ef26309714086650989d00a23b07128c93",
+    "text.pending_binary": "a9ff5cc9be45e86a02c839d0b8a4693f942ad9874303e60aa29282707c1a962f",
+    "under.direction": "a64da379d9493b6460b7bed7bdc3c77e8e56aaa4bc2cd458d9872c33a7457ef3",
+    "under.stretched": "29c24f7ded73ff856396033766caf6096011193c8c9b6dd9d8ae7f028dfbc4f6",
+    "vol.explained_by_event": "3ad42f69501be5952995ecf3f9956a6007012288aabdd443567fa24b3d04d78a",
+    "vol.stance": "3da9cd285f5739dc591db53320b92de7320902c9edefcdb4418dcb588a99db0f"
+  }
+}

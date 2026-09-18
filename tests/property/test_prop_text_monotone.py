@@ -190,12 +190,81 @@ def worsen_rank(text: Mapping[str, Answer], direction_is_bullish: bool) -> dict[
 # ======================================================================================================================
 
 
+def _peaked(qid: str, top: str, weight: float) -> ChoiceAns:
+    labels = vocab.CHOICE_LABELS[qid]
+    rest = (1.0 - weight) / (len(labels) - 1)
+    return choice(qid, [weight if label == top else rest for label in labels])
+
+
+def favourable_core(kind: StructureKind, rng: np.random.Generator) -> dict[str, Answer]:
+    """An answer set aimed at `kind`: peaked enough that the 7.2 gates and the score floor are often cleared."""
+    from jevbot.types import STRUCTURE_DIRECTION, STRUCTURE_STANCE, Direction
+
+    direction = STRUCTURE_DIRECTION[kind]
+    regime_top = {Direction.BULLISH: "trending_up_calm", Direction.BEARISH: "orderly_downtrend", Direction.NEUTRAL: "range_bound_calm"}[
+        direction
+    ]
+    return {
+        "regime.market": _peaked("regime.market", regime_top, float(rng.uniform(0.50, 0.95))),
+        "under.direction": _peaked("under.direction", direction.value, float(rng.uniform(0.60, 0.95))),
+        "under.stretched": NoulAns(p=float(rng.uniform(0.0, 0.5))),
+        "vol.stance": _peaked("vol.stance", STRUCTURE_STANCE[kind].value, float(rng.uniform(0.60, 0.95))),
+        "vol.explained_by_event": NoulAns(p=float(rng.uniform(0.0, 0.4))),
+        "fit.structure_family": _peaked("fit.structure_family", kind.value, float(rng.uniform(0.50, 0.95))),
+        "risk.environment": score([3.0, 1.0, float(rng.uniform(0.0, 1.0)), float(rng.uniform(0.0, 0.5))]),
+    }
+
+
+def facts_for(kind: StructureKind, rng: np.random.Generator) -> EntryFacts:
+    """Facts that satisfy the 7.3 cross-checks of `kind` (so the crosscheck step is not the one that always fires)."""
+    from jevbot.types import SHORT_PREMIUM, STRUCTURE_DIRECTION, Direction
+
+    direction = STRUCTURE_DIRECTION[kind]
+    trend = {
+        Direction.BULLISH: ("up", "flat", "mixed"),
+        Direction.BEARISH: ("down", "flat", "mixed"),
+        Direction.NEUTRAL: ("flat", "mixed"),
+    }[direction]
+    iv_rv = ("iv_rich", "iv_very_rich") if kind in SHORT_PREMIUM else vocab.IV_RV
+    iv_rank = ("very_low", "low") if kind in (StructureKind.LONG_CALL, StructureKind.LONG_PUT) else vocab.PCTL5
+    return EntryFacts(
+        trend_code=str(rng.choice(list(trend))),
+        iv_rank_code=str(rng.choice(list(iv_rank))),
+        iv_rv_code=str(rng.choice(list(iv_rv))),
+        dist_code=str(rng.choice(list(vocab.DIST_ATR))),
+        news_enabled=True,
+        news_count=int(rng.integers(1, 8)),
+        news_recent_count=int(rng.integers(0, 4)),
+        spot=45_000,
+        iv30_bp=1600,
+        em_hold_tenths=35,
+        events_in_window=int(rng.integers(0, 3)),
+        thesis="generated",
+    )
+
+
 def _entry_draws() -> list[tuple[dict[str, Answer], dict[str, Answer], EntryFacts]]:
+    """Half the draws aim at a structure (so `enter` actually happens), half are pure Dirichlet noise."""
     rng = np.random.default_rng(SEED)
-    return [(random_core(rng), random_text(rng), random_entry_facts(rng)) for _ in range(DRAWS)]
+    draws: list[tuple[dict[str, Answer], dict[str, Answer], EntryFacts]] = []
+    for i in range(DRAWS):
+        if i % 2 == 0:
+            kind = ALL_KINDS[int(rng.integers(len(ALL_KINDS)))]
+            draws.append((favourable_core(kind, rng), random_text(rng), facts_for(kind, rng)))
+        else:
+            draws.append((random_core(rng), random_text(rng), random_entry_facts(rng)))
+    return draws
 
 
 ENTRY_DRAWS: Final = _entry_draws()
+
+
+def _non_text(reasons: Sequence[str]) -> list[str]:
+    return [code for code in reasons if not code.startswith("veto:text.")]
+
+
+def _veto_qids(reasons: Sequence[str]) -> set[str]:
+    return {code.split(":")[1] for code in reasons if code.startswith("veto:text.")}
 
 
 def decide(engine: DecisionRules, core: Mapping[str, Answer], text: Mapping[str, Answer] | None, facts: EntryFacts) -> Any:
@@ -220,8 +289,8 @@ def test_e1_no_text_answer_can_move_the_composite_or_the_tier() -> None:
             assert with_text.score_core_ppm == text_free.score_core_ppm
             assert with_text.tier_ppm == text_free.tier_ppm
             assert with_text.kind == text_free.kind
-            assert with_text.features_ppm["align"] == text_free.features_ppm["align"]
-            assert with_text.features_ppm["calm"] == text_free.features_ppm["calm"]
+            for name in ("align", "volfit", "fit", "regimefit", "calm"):
+                assert with_text.features_ppm.get(name) == text_free.features_ppm.get(name)
         # the text result only ever adds veto reasons on top of the text-free ones
         vetoed = decide(engine, core, text, facts)
         assert [code for code in vetoed.reasons if not code.startswith("veto:text")] == list(text_free.reasons)
@@ -240,7 +309,12 @@ def test_e2_worse_text_vetoes_never_open_a_trade_and_never_raise_the_tier() -> N
             flips += 1
         assert worse.tier_ppm <= base.tier_ppm
         assert worse.score_core_ppm == base.score_core_ppm
-        assert set(base.reasons) <= set(worse.reasons)
+        # the text-free reasons are untouched, and no text veto ever RELAXES (a band may only move CLEAR -> UNCERTAIN -> VETO)
+        assert _non_text(base.reasons) == _non_text(worse.reasons)
+        assert _veto_qids(base.reasons) <= _veto_qids(worse.reasons)
+        for qid in _veto_qids(base.reasons):
+            if f"veto:{qid}:hard" in base.reasons:
+                assert f"veto:{qid}:hard" in worse.reasons
     assert flips > 0, "worsening the vetoes must actually block some entries or the property is vacuous"
 
 

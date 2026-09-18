@@ -80,7 +80,6 @@ __all__ = [
 
 FloatArray = npt.NDArray[np.float64]
 IntArray = npt.NDArray[np.int64]
-BoolArray = npt.NDArray[np.bool_]
 
 #: `pav_isotonic` returns this: a monotone non-decreasing map, clipped to the fitted range at both ends.
 IsotonicMap = Callable[[npt.ArrayLike], FloatArray]
