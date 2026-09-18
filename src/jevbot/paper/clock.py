@@ -1,0 +1,457 @@
+"""`BrokerClock` (round-trip compensated, CLOCK_BOOTTIME bridged) and `AlpacaCalendar` (DESIGN.md 11.4, 3.1; D25, G4; INV-12).
+
+Two facts drive this module.
+
+**Paper trading time is the broker's, not the host's** (INV-12). A WSL guest clock drifts, and it jumps whenever the Windows
+host sleeps. So `now()` never reads the wall clock: it is the broker timestamp of the last sync plus the elapsed
+`CLOCK_BOOTTIME` since that sync. `CLOCK_MONOTONIC` would be wrong here - it is *paused* while the VM is suspended, so a
+two-hour host sleep would look like no time at all and the clock would silently stay behind. `CLOCK_BOOTTIME` keeps counting,
+which is exactly how a wake from sleep is detected (`needs_sync`).
+
+**The measured skew must not be an artefact of a slow read.** `sync()` brackets `get_clock()` between two boottime readings
+and compares the broker timestamp with the local UTC time at the MIDPOINT of the round trip, so a 400 ms request contributes
+0 ms of apparent skew instead of 200 ms (D25: skew > 5 s blocks *opening* orders; V3: closes continue on broker time, so a
+fake skew must never strand a must-exit position).
+
+`AlpacaCalendar` turns `get_calendar()` rows into the `Calendar` protocol of 3.1. The vendor model parses `open` / `close`
+as NAIVE datetimes built from the row's date and a "%H:%M" exchange-local string, so they are localised with
+`ZoneInfo("America/New_York")` and converted to UTC - which is what makes a DST boundary come out right. At boot the rows are
+cross-checked against XNYS: **the earlier close wins** and every disagreement raises an alert (G4). All cut-offs are offsets
+from that day's close (`offset_from_close`); this module contains no time of day (INV-13).
+"""
+
+import time
+from bisect import bisect_left, bisect_right
+from collections import Counter
+from collections.abc import Callable, Iterable, Sequence
+from datetime import UTC, date, datetime, timedelta
+from typing import Any, Final, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo
+
+from jevbot.errors import BrokerError, InvariantError
+from jevbot.protocols import Calendar
+from jevbot.types import ClockReading
+
+__all__ = [
+    "EXCHANGE_TZ",
+    "AlpacaCalendar",
+    "BrokerClock",
+    "CalendarRow",
+    "RawClock",
+    "boottime",
+    "to_utc",
+]
+
+EXCHANGE_TZ: Final = ZoneInfo("America/New_York")
+"""The exchange-local zone the vendor's naive calendar strings are expressed in (G4)."""
+
+DEFAULT_RESYNC_AFTER_S: Final = 60.0
+"""11.4: sync every 60 s, at every phase boundary and before every order."""
+
+DEFAULT_BOOTTIME_GAP_S: Final = 90.0
+"""11.4: a boottime gap larger than this between two readings means a host sleep - re-sync and reconcile before anything else."""
+
+_MS: Final = 1000.0
+
+
+@runtime_checkable
+class RawClock(Protocol):
+    """The shape of `alpaca.trading.models.Clock` (verified against the pinned wheel in `alpaca_client`)."""
+
+    @property
+    def timestamp(self) -> datetime: ...
+    @property
+    def is_open(self) -> bool: ...
+    @property
+    def next_open(self) -> datetime: ...
+    @property
+    def next_close(self) -> datetime: ...
+
+
+@runtime_checkable
+class CalendarRow(Protocol):
+    """The shape of `alpaca.trading.models.Calendar`: a session date plus NAIVE exchange-local open / close datetimes."""
+
+    @property
+    def date(self) -> date: ...
+    @property
+    def open(self) -> datetime: ...
+    @property
+    def close(self) -> datetime: ...
+
+
+def boottime() -> float:
+    """Seconds on `CLOCK_BOOTTIME`: monotonic AND advancing while the machine (or the WSL VM) is suspended.
+
+    Falls back to `CLOCK_MONOTONIC` where the constant does not exist (non-Linux); the sleep detection of 11.4 then only
+    catches gaps the process was awake for, which is why the paper service is Linux-only (11.10).
+    """
+    return time.clock_gettime(getattr(time, "CLOCK_BOOTTIME", time.CLOCK_MONOTONIC))
+
+
+def to_utc(value: datetime, what: str) -> datetime:
+    """A vendor datetime -> tz-aware UTC. A NAIVE value is refused: silently assuming a zone is how skew bugs are born."""
+    if not isinstance(value, datetime):
+        raise BrokerError(f"the broker reported {what}={value!r}, which is not a datetime")
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        raise BrokerError(f"the broker reported a naive {what} ({value.isoformat()}): the offset is needed to measure skew")
+    return value.astimezone(UTC)
+
+
+# ======================================================================================================================
+# BrokerClock
+# ======================================================================================================================
+
+
+class BrokerClock:
+    """`Clock` (3.1) on the broker's own clock, round-trip compensated and bridged over host sleep (11.4, INV-12).
+
+    `fetch` returns one vendor clock reading; `paper/broker.py::AlpacaPaperBroker.raw_clock` supplies it so that the call
+    carries the adapter's deadline, timeout and rate limit. `boottime_fn` / `utcnow` exist for tests only.
+    """
+
+    def __init__(
+        self,
+        fetch: Callable[[], RawClock],
+        *,
+        max_skew_ms: int,
+        resync_after_s: float = DEFAULT_RESYNC_AFTER_S,
+        boottime_gap_s: float = DEFAULT_BOOTTIME_GAP_S,
+        boottime_fn: Callable[[], float] = boottime,
+        utcnow: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._fetch = fetch
+        self._max_skew_ms = int(max_skew_ms)
+        self._resync_after_s = float(resync_after_s)
+        self._boottime_gap_s = float(boottime_gap_s)
+        self._boottime = boottime_fn
+        self._utcnow = utcnow
+        self._reading: ClockReading | None = None
+        self._broker_ts: datetime | None = None
+        self._boottime_at_sync: float = 0.0
+        self._last_boottime: float = 0.0
+        self._unsynced: bool = True
+        self._skew_high_since: float | None = None
+
+    # --- state ---------------------------------------------------------------------------------------------------------
+
+    @property
+    def synced(self) -> bool:
+        """False before the first sync and after a detected host sleep (11.4)."""
+        return not self._unsynced and self._reading is not None
+
+    @property
+    def needs_sync(self) -> bool:
+        """True when the clock is unsynced or the last sync is older than `resync_after_s` of boottime."""
+        if self._unsynced or self._reading is None:
+            return True
+        return self._boottime() - self._boottime_at_sync >= self._resync_after_s
+
+    @property
+    def max_skew_ms(self) -> int:
+        return self._max_skew_ms
+
+    @property
+    def skew_exceeded(self) -> bool:
+        """True when the LAST reading's skew is over `health.max_clock_skew_ms` (risk check 8 blocks opening orders)."""
+        return self._reading is not None and self._reading.skew_ms > self._max_skew_ms
+
+    def skew_high_for_s(self) -> float:
+        """Seconds of boottime the skew has been over the threshold without interruption; 0.0 when it is not.
+
+        The kill switch escalates `CLOCK_SKEW` only beyond `health.clock_skew_kill_after_s` during market hours (V2, V3).
+        """
+        if self._skew_high_since is None:
+            return 0.0
+        return max(0.0, self._boottime() - self._skew_high_since)
+
+    # --- Clock protocol ------------------------------------------------------------------------------------------------
+
+    def now(self) -> datetime:
+        """`broker_ts + (boottime_now - boottime_at_sync)`, tz-aware UTC. Never the host wall clock (INV-12).
+
+        A boottime jump larger than `boottime_gap_s` since the previous reading marks the clock unsynced (a host sleep); the
+        extrapolation is still returned, because a risk-reducing close must never be blocked by a clock problem (INV-21).
+        The caller checks `needs_sync` at every phase boundary and before every order.
+        """
+        if self._broker_ts is None:
+            raise InvariantError("BrokerClock.now() before the first sync(): boot step B5 syncs before anything reads the clock")
+        current = self._boottime()
+        if current - self._last_boottime > self._boottime_gap_s:
+            self._unsynced = True
+        self._last_boottime = current
+        return self._broker_ts + timedelta(seconds=current - self._boottime_at_sync)
+
+    def reading(self) -> ClockReading | None:
+        """The last sync's reading; `None` before the first sync."""
+        return self._reading
+
+    def sync(self) -> ClockReading:
+        """Force a broker re-sync. Round-trip compensated: the skew is measured against local UTC at the midpoint of the call."""
+        t0 = self._boottime()
+        local0 = self._utcnow()
+        raw = self._fetch()
+        t1 = self._boottime()
+
+        rtt_s = max(0.0, t1 - t0)
+        broker_ts = to_utc(raw.timestamp, "clock timestamp")
+        local_mid = local0 + timedelta(seconds=rtt_s / 2)
+        skew_ms = int(round(abs((local_mid - broker_ts).total_seconds()) * _MS))
+
+        reading = ClockReading(
+            broker_ts=broker_ts,
+            local_ts=local_mid,
+            rtt_ms=int(round(rtt_s * _MS)),
+            skew_ms=skew_ms,
+            is_open=bool(raw.is_open),
+            next_open=to_utc(raw.next_open, "clock next_open"),
+            next_close=to_utc(raw.next_close, "clock next_close"),
+        )
+        self._reading = reading
+        self._broker_ts = broker_ts
+        self._boottime_at_sync = t1
+        self._last_boottime = t1
+        self._unsynced = False
+        if skew_ms > self._max_skew_ms:
+            self._skew_high_since = t1 if self._skew_high_since is None else self._skew_high_since
+        else:
+            self._skew_high_since = None
+        return reading
+
+
+# ======================================================================================================================
+# AlpacaCalendar
+# ======================================================================================================================
+
+
+class _Session:
+    __slots__ = ("close", "day", "open", "ordinal")
+
+    def __init__(self, day: date, open_ts: datetime, close_ts: datetime) -> None:
+        self.day = day
+        self.open = open_ts
+        self.close = close_ts
+        self.ordinal = day.toordinal()
+
+
+class AlpacaCalendar:
+    """`Calendar` (3.1) over the broker's own `get_calendar()` rows, cross-checked against XNYS (11.4, G4).
+
+    The vendor rows are the authority for WHICH days the paper account can trade - they are the venue's own calendar - but
+    the close is the EARLIER of the vendor's and XNYS's whenever both know the session, and every disagreement (a session
+    only one calendar has, or a differing close) is reported through `alerts` and to the injected `on_alert` hook.
+
+    A date outside the loaded range raises `ValueError`, never a silent "not a session": beyond the horizon the true answer
+    is unknown (the same contract as `cal.XnysCalendar`).
+    """
+
+    def __init__(
+        self,
+        rows: Iterable[CalendarRow],
+        *,
+        cross_check: Calendar | None = None,
+        on_alert: Callable[[str], None] | None = None,
+    ) -> None:
+        sessions = [self._session_of_row(row) for row in rows]
+        if not sessions:
+            raise BrokerError("the broker returned an empty trading calendar")
+        sessions.sort(key=lambda s: s.ordinal)
+        days = [s.day for s in sessions]
+        if len(set(days)) != len(days):
+            duplicates = sorted({d.isoformat() for d in days if days.count(d) > 1})
+            raise BrokerError(f"the broker calendar repeats {', '.join(duplicates)}")
+
+        self._alerts: list[str] = []
+        if cross_check is not None:
+            sessions = self._apply_cross_check(sessions, cross_check)
+        self._sessions: Final[tuple[_Session, ...]] = tuple(sessions)
+        self._ordinals: Final[tuple[int, ...]] = tuple(s.ordinal for s in self._sessions)
+        self._lo: Final[date] = self._sessions[0].day
+        self._hi: Final[date] = self._sessions[-1].day
+        self._regular_close: Final = self._modal_close()
+        for alert in self._alerts:
+            if on_alert is not None:
+                on_alert(alert)
+
+    # --- construction --------------------------------------------------------------------------------------------------
+
+    @staticmethod
+    def _session_of_row(row: CalendarRow) -> _Session:
+        day, open_naive, close_naive = row.date, row.open, row.close
+        if not isinstance(day, date) or isinstance(day, datetime):
+            raise BrokerError(f"the broker calendar row has date={day!r}, which is not a calendar date")
+        open_ts = AlpacaCalendar._localise(open_naive, day, "open")
+        close_ts = AlpacaCalendar._localise(close_naive, day, "close")
+        if not open_ts < close_ts:
+            raise BrokerError(f"the broker calendar row for {day.isoformat()} closes at or before it opens")
+        return _Session(day, open_ts, close_ts)
+
+    @staticmethod
+    def _localise(value: datetime, day: date, what: str) -> datetime:
+        """The vendor parses "<date> <HH:MM>" into a NAIVE exchange-local datetime; attach America/New_York, then go UTC."""
+        if not isinstance(value, datetime):
+            raise BrokerError(f"the broker calendar row for {day.isoformat()} has {what}={value!r}, which is not a datetime")
+        if value.tzinfo is not None and value.tzinfo.utcoffset(value) is not None:
+            return value.astimezone(UTC)
+        return value.replace(tzinfo=EXCHANGE_TZ).astimezone(UTC)
+
+    def _apply_cross_check(self, sessions: list[_Session], other: Calendar) -> list[_Session]:
+        """Earlier close wins; every disagreement is an alert (G4)."""
+        checked: list[_Session] = []
+        for session in sessions:
+            try:
+                theirs_open, theirs_close = other.open_close(session.day)
+            except ValueError:
+                self._alerts.append(f"calendar disagreement on {session.day.isoformat()}: the broker lists a session the cross-check does not")
+                checked.append(session)
+                continue
+            if theirs_close != session.close:
+                winner = min(theirs_close, session.close)
+                self._alerts.append(
+                    f"calendar disagreement on {session.day.isoformat()}: broker close {session.close.isoformat()} vs cross-check "
+                    f"{theirs_close.isoformat()}; the earlier close {winner.isoformat()} wins"
+                )
+                session = _Session(session.day, session.open, winner)
+            if theirs_open != session.open:
+                self._alerts.append(
+                    f"calendar disagreement on {session.day.isoformat()}: broker open {session.open.isoformat()} vs cross-check "
+                    f"{theirs_open.isoformat()}"
+                )
+            checked.append(session)
+        known = {s.day for s in sessions}
+        for missing in self._cross_check_only(other, known):
+            self._alerts.append(f"calendar disagreement on {missing.isoformat()}: the cross-check lists a session the broker does not")
+        return checked
+
+    @staticmethod
+    def _cross_check_only(other: Calendar, known: set[date]) -> list[date]:
+        if not known:
+            return []
+        try:
+            theirs = other.sessions(min(known), max(known))
+        except ValueError:
+            return []
+        return [d for d in theirs if d not in known]
+
+    def _modal_close(self) -> Any:
+        """The exchange-local time of day most sessions close at; anything earlier is an early close (no literal, INV-13)."""
+        counts = Counter(s.close.astimezone(EXCHANGE_TZ).timetz().replace(tzinfo=None) for s in self._sessions)
+        return counts.most_common(1)[0][0]
+
+    # --- helpers -------------------------------------------------------------------------------------------------------
+
+    @property
+    def alerts(self) -> tuple[str, ...]:
+        """Every cross-check disagreement found at construction (boot step B5 logs and alerts on them)."""
+        return tuple(self._alerts)
+
+    @property
+    def bounds(self) -> tuple[date, date]:
+        """(first session, last session) this calendar can answer for, inclusive."""
+        return (self._lo, self._hi)
+
+    def _ordinal(self, name: str, d: date) -> int:
+        if not isinstance(d, date) or isinstance(d, datetime):
+            raise ValueError(f"{name} must be a datetime.date, got {type(d).__name__}")
+        if not self._lo <= d <= self._hi:
+            raise ValueError(f"{name} {d.isoformat()} is outside the broker calendar {self._lo.isoformat()}..{self._hi.isoformat()}")
+        return d.toordinal()
+
+    def _index(self, session: date) -> int:
+        ordinal = self._ordinal("session", session)
+        i = bisect_left(self._ordinals, ordinal)
+        if i == len(self._ordinals) or self._ordinals[i] != ordinal:
+            raise ValueError(f"{session.isoformat()} is not a session of the broker calendar")
+        return i
+
+    def _at(self, i: int, what: str) -> date:
+        if not 0 <= i < len(self._sessions):
+            raise ValueError(f"{what} lies outside the broker calendar {self._lo.isoformat()}..{self._hi.isoformat()}")
+        return self._sessions[i].day
+
+    # --- Calendar protocol ---------------------------------------------------------------------------------------------
+
+    def is_session(self, d: date) -> bool:
+        ordinal = self._ordinal("d", d)
+        i = bisect_left(self._ordinals, ordinal)
+        return i < len(self._ordinals) and self._ordinals[i] == ordinal
+
+    def sessions(self, start: date, end: date) -> list[date]:
+        """Every session in [start, end], inclusive."""
+        lo = bisect_left(self._ordinals, self._ordinal("start", start))
+        hi = bisect_right(self._ordinals, self._ordinal("end", end))
+        return [s.day for s in self._sessions[lo:hi]]
+
+    def open_close(self, session: date) -> tuple[datetime, datetime]:
+        """(open, close) of a session, UTC; early closes and the earlier-close-wins cross-check are already applied."""
+        s = self._sessions[self._index(session)]
+        return (s.open, s.close)
+
+    def is_early_close(self, session: date) -> bool:
+        """True when the session closes before the calendar's regular exchange-local close (a 13:00 ET half day)."""
+        s = self._sessions[self._index(session)]
+        return s.close.astimezone(EXCHANGE_TZ).timetz().replace(tzinfo=None) < self._regular_close
+
+    def next_session(self, d: date, n: int = 1) -> date:
+        """The n-th session strictly after `d` (any calendar date)."""
+        i = bisect_right(self._ordinals, self._ordinal("d", d)) + _as_count("n", n) - 1
+        return self._at(i, f"session {n} after {d.isoformat()}")
+
+    def prev_session(self, d: date, n: int = 1) -> date:
+        """The n-th session strictly before `d` (any calendar date)."""
+        i = bisect_left(self._ordinals, self._ordinal("d", d)) - _as_count("n", n)
+        return self._at(i, f"session {n} before {d.isoformat()}")
+
+    def prev_or_same_session(self, d: date) -> date:
+        """THE map expiry -> last trading day (Conventions, INV-11): `d` itself when it is a session, else the one before."""
+        return d if self.is_session(d) else self.prev_session(d)
+
+    def sessions_between(self, a: date, b: date) -> int:
+        """The number of sessions in the half-open interval (a, b]; negative arguments order is not allowed to matter."""
+        lo, hi = (a, b) if a <= b else (b, a)
+        count = bisect_right(self._ordinals, self._ordinal("b", hi)) - bisect_right(self._ordinals, self._ordinal("a", lo))
+        return count if a <= b else -count
+
+    def session_of(self, ts: datetime) -> date | None:
+        """The session whose [open, close] contains `ts`; `None` outside trading hours."""
+        if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
+            raise ValueError("session_of needs a tz-aware timestamp")
+        moment = ts.astimezone(UTC)
+        i = bisect_right([s.open for s in self._sessions], moment) - 1
+        if i < 0:
+            return None
+        s = self._sessions[i]
+        return s.day if s.open <= moment <= s.close else None
+
+    def offset_from_close(self, session: date, minutes_before: int) -> datetime:
+        """THE way to express a cut-off (INV-13): `close - minutes_before`; a negative value lands after the close."""
+        _, close = self.open_close(session)
+        return close - timedelta(minutes=minutes_before)
+
+    def next_open_after(self, ts: datetime) -> datetime:
+        """The first session open strictly after `ts` (the `knowable_at` of an EOD series)."""
+        if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
+            raise ValueError("next_open_after needs a tz-aware timestamp")
+        moment = ts.astimezone(UTC)
+        opens = [s.open for s in self._sessions]
+        i = bisect_right(opens, moment)
+        if i >= len(opens):
+            raise ValueError(f"no session opens after {moment.isoformat()} inside the broker calendar")
+        return opens[i]
+
+
+def _as_count(name: str, n: int) -> int:
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+        raise ValueError(f"{name} must be an int >= 1, got {n!r}")
+    return n
+
+
+def calendar_rows(client: Any, start: date, end: date) -> Sequence[CalendarRow]:
+    """`get_calendar(GetCalendarRequest(start, end))` on a trading client, as the raw vendor rows.
+
+    Kept here so that `AlpacaCalendar` itself stays a pure function of its rows and can be built from a recorded day.
+    """
+    from alpaca.trading.requests import GetCalendarRequest
+
+    rows = client.get_calendar(GetCalendarRequest(start=start, end=end))
+    return list(rows)
