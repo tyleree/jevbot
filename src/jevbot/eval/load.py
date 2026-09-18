@@ -205,6 +205,15 @@ class RunStore:
                 "payload": json.loads(str(row["payload"])),
             }
 
+    def sessions(self) -> tuple[date, ...]:
+        """Every session the run ledgered, ascending - the run's own trading calendar.
+
+        Holding periods are counted in SESSIONS (12.2), and a run store knows its own sessions exactly; deriving them
+        from calendar days would count a weekend as two trading days.
+        """
+        rows = self.conn.execute("SELECT DISTINCT session FROM ledger ORDER BY session").fetchall()
+        return tuple(date.fromisoformat(str(row["session"])) for row in rows)
+
     def payload_frame(self, kind: LedgerKind | str) -> pd.DataFrame:
         """`seq, session, as_of` plus one column per top-level payload key, for one ledger kind."""
         records = [{"seq": row["seq"], "session": row["session"], "as_of": row["as_of"], **row["payload"]} for row in self.rows(kind)]
@@ -739,6 +748,7 @@ def trades_frame(store: StoreArg) -> pd.DataFrame:
                     *(f"close_net_{band}" for band in BANDS),
                 )
             )
+        session_index = {session: index for index, session in enumerate(handle.sessions())}
         reason_by_intent = dict(zip(intents["intent_id"], intents["reason"], strict=False)) if not intents.empty else {}
         underlying_by_intent = dict(zip(intents["intent_id"], intents["underlying"], strict=False)) if not intents.empty else {}
         kind_by_intent = dict(zip(intents["intent_id"], intents["kind"], strict=False)) if not intents.empty else {}
@@ -763,7 +773,9 @@ def trades_frame(store: StoreArg) -> pd.DataFrame:
                 "qty": int(first_open["qty"] or 0),
                 "entry_session": entry_session,
                 "exit_session": exit_session,
-                "holding_sessions": None if exit_session is None else (exit_session - entry_session).days,
+                "holding_sessions": (
+                    None if exit_session is None else session_index.get(exit_session, 0) - session_index.get(entry_session, 0)
+                ),
                 "exit_reason": reason_by_intent.get(intent_id) if closed else None,
                 "forced": bool(closes["forced"].any()) if closed else False,
                 "fees_micro": int(group["fees_micro"].fillna(0).sum()),

@@ -239,14 +239,6 @@ def test_tie_rule_moves_an_edge_forward_to_the_next_distinct_value() -> None:
     assert [b.freq for b in table.bins] == pytest.approx([0.0, 0.5, 1.0])
 
 
-def test_under_sized_bins_merge_with_their_neighbour() -> None:
-    p = [0.1] * 40 + [0.2] * 3 + [0.3] * 40 + [0.4] * 40
-    y = [0] * len(p)
-    table = cal.reliability_table(p, y, n_bins=4, strategy="quantile", min_per_bin=10)
-    assert all(b.n >= 10 for b in table.bins)
-    assert sum(b.n for b in table.bins) == len(p)
-
-
 def test_fewer_than_three_bins_falls_back_to_fixed_edges() -> None:
     """12.3: fewer than 3 bins => fall back to fixed edges 0, 0.1, ..., 1."""
     p = [0.15] * 60 + [0.85] * 60
@@ -255,6 +247,31 @@ def test_fewer_than_three_bins_falls_back_to_fixed_edges() -> None:
     assert table.fell_back
     assert len(table.bins) == 2
     assert [(b.lo, b.hi) for b in table.bins] == [(pytest.approx(0.1), pytest.approx(0.2)), (pytest.approx(0.8), pytest.approx(0.9))]
+
+
+def _quantile_bin_sizes(p: list[float], *, n_bins: int, min_per_bin: int) -> list[int]:
+    table = cal.reliability_table(p, [0] * len(p), n_bins=n_bins, strategy="quantile", min_per_bin=min_per_bin)
+    assert not table.fell_back
+    return [b.n for b in table.bins]
+
+
+def test_an_under_sized_first_bin_merges_forward() -> None:
+    p = [0.1] * 10 + [0.2] * 3 + [0.3] * 40 + [0.4] * 40 + [0.5] * 40
+    assert _quantile_bin_sizes(p, n_bins=44, min_per_bin=20) == [53, 40, 40]
+
+
+def test_an_under_sized_middle_bin_merges_with_its_smaller_neighbour() -> None:
+    """Right neighbour smaller => merge right; left neighbour smaller => merge left."""
+    merge_right = [0.1] * 40 + [0.2] * 3 + [0.3] * 3 + [0.4] * 40 + [0.5] * 40
+    assert _quantile_bin_sizes(merge_right, n_bins=42, min_per_bin=20) == [40, 46, 40]
+
+    merge_left = [0.1] * 30 + [0.2] * 3 + [0.3] * 40 + [0.4] * 40
+    assert _quantile_bin_sizes(merge_left, n_bins=37, min_per_bin=20) == [33, 40, 40]
+
+
+def test_an_under_sized_last_bin_merges_backward() -> None:
+    p = [0.1] * 40 + [0.2] * 40 + [0.3] * 40 + [0.4] * 2
+    assert _quantile_bin_sizes(p, n_bins=41, min_per_bin=20) == [40, 40, 42]
 
 
 def test_both_the_quantile_and_the_fixed_width_ece_are_available() -> None:
@@ -493,6 +510,55 @@ def test_base_rate_in_sample_is_the_whole_window_frequency() -> None:
     for question_id in QUESTIONS:
         rows = np.asarray(events["question_id"] == question_id)
         assert values[rows].tolist() == pytest.approx([float(events.loc[rows, "y"].mean())] * int(rows.sum()))
+
+
+def test_void_and_open_outcomes_are_never_training_pairs() -> None:
+    """A void outcome (`y = None`, 2.7) and a still-open forecast (no `resolved_on`) cannot train a reference."""
+    rng = np.random.default_rng(106)
+    history = _history_frame(rng, n_sessions=260, start=0)
+    events = _events_frame(rng, n_sessions=5, start=261, p_forecast=0.12)
+
+    clean = cal.base_rate_expanding(events, history, min_events=250)
+    assert bool(np.isfinite(clean).all())
+
+    voided = history.copy()
+    voided.loc[voided.index[:20], "y"] = None  # 20 void outcomes disappear from the training set
+    fewer = cal.base_rate_expanding(events, voided, min_events=250)
+    assert not np.allclose(clean, fewer)
+
+    opened = history.copy()
+    opened.loc[opened.index[:20], "resolved_on"] = None  # still open: also excluded
+    assert np.allclose(cal.base_rate_expanding(events, opened, min_events=250), fewer, equal_nan=True)
+
+
+def test_timestamp_typed_session_columns_are_accepted() -> None:
+    """`eval.load` may hand over pandas datetime64 columns instead of `datetime.date` objects."""
+    rng = np.random.default_rng(108)
+    history = _history_frame(rng, n_sessions=260, start=0)
+    events = _events_frame(rng, n_sessions=5, start=261, p_forecast=0.12)
+    as_dates = cal.base_rate_expanding(events, history, min_events=250)
+
+    stamped_events = events.assign(
+        session=pd.to_datetime(events["session"]), resolved_on=pd.to_datetime(events["resolved_on"])
+    )
+    stamped_history = history.assign(
+        session=pd.to_datetime(history["session"]), resolved_on=pd.to_datetime(history["resolved_on"])
+    )
+    assert np.allclose(cal.base_rate_expanding(stamped_events, stamped_history, min_events=250), as_dates, equal_nan=True)
+
+
+def test_an_explicit_session_grid_overrides_the_derived_one() -> None:
+    """A caller holding the real `Calendar` can pass the trading-session grid instead of the data-derived one."""
+    rng = np.random.default_rng(110)
+    events = _events_frame(rng, n_sessions=100, start=0, p_forecast=0.12, questions=(QUESTIONS[0],))
+    derived = cal.base_rate_expanding(events, None, min_events=250)
+    explicit = cal.base_rate_expanding(events, None, min_events=250, sessions=cal.session_grid(events))
+    assert np.allclose(derived, explicit, equal_nan=True)
+
+    # a coarser grid moves `prev_session(D, h)` further back, so a different training set is in scope
+    sparse = cal.session_grid(events)[::2]
+    on_sparse = cal.base_rate_expanding(events, None, min_events=250, sessions=sparse)
+    assert not np.allclose(derived, on_sparse, equal_nan=True)
 
 
 def test_base_rate_rejects_an_impossible_min_events() -> None:

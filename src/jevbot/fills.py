@@ -2,6 +2,8 @@
 (DESIGN.md 10.3-10.5, 10.7; implements `protocols.FillModel`, 3.4).
 
 Integer arithmetic throughout, rounding always against us (money is integer cents per share; nothing here returns a float).
+Every number this module produces ends up in a hashed FILL / MARK payload, so none of it may be a float (INV-24): config
+fractions are read as the exact decimals the operator wrote (`Fraction(repr(x))`) and every division is a ceiling or floor.
 
 * 10.3 bands per leg, with `p_bp = orats_p[min(n_legs, 4) - 1]` in basis points (7500 / 6600 / 5600 / 5300 by default):
       BUY   orats = bid + cdiv((ask - bid) * p_bp, 10000)    worst = ask    mid = cdiv(bid + ask, 2)

@@ -41,8 +41,8 @@ from jevbot.types import (
     OutcomeSpec,
     RunMeta,
     RunMode,
-    SnapshotKey,
     Slot,
+    SnapshotKey,
 )
 
 # ======================================================================================================================
@@ -417,7 +417,7 @@ class _RunState:
         self.tier = tier
         self.namespace = namespace
         self.rng = rng
-        self.cash: dict[str, int] = {band: spec.initial_cash for band in ("orats", "worst", "mid")}
+        self.cash: dict[str, int] = dict.fromkeys(("orats", "worst", "mid"), spec.initial_cash)
         self.equity: dict[str, int] = dict(self.cash)
         self.open_positions: list[_OpenPosition] = []
         self.closed_positions: list[str] = []
@@ -442,7 +442,9 @@ def _write_session(conn: sqlite3.Connection, writer: _Writer, state: _RunState, 
     killed = spec.kill_session_index is not None and index == spec.kill_session_index
     halted = killed or index == (spec.kill_session_index or -99) + 1
 
-    writer.append(LedgerKind.SESSION_START, session, as_of, {"session": canon.render_session(session), "slot": Slot.EOD.value, "phase": "full"})
+    writer.append(
+        LedgerKind.SESSION_START, session, as_of, {"session": canon.render_session(session), "slot": Slot.EOD.value, "phase": "full"}
+    )
 
     n_decisions = 0
     n_forecasts_here = 0
@@ -634,9 +636,7 @@ def _write_decision(
     )
 
 
-def _write_forecasts(
-    writer: _Writer, state: _RunState, session: date, as_of: datetime, underlying: str, decision_id: str
-) -> int:
+def _write_forecasts(writer: _Writer, state: _RunState, session: date, as_of: datetime, underlying: str, decision_id: str) -> int:
     spec = state.spec
     index = state.session_index
     key = SnapshotKey(session=session, slot=Slot.EOD)
@@ -748,7 +748,6 @@ def _write_verdict_and_orders(
     outcome: str,
     index: int,
 ) -> int:
-    spec = state.spec
     reject_codes: tuple[str, ...]
     approved = False
     if outcome == "enter":
@@ -872,9 +871,7 @@ def _write_verdict_and_orders(
     )
     for band, value in open_net.items():
         state.cash[band] -= value * 100 * 1
-    state.open_positions.append(
-        _OpenPosition(position_id, underlying, "iron_condor", 1, index, open_net)
-    )
+    state.open_positions.append(_OpenPosition(position_id, underlying, "iron_condor", 1, index, open_net))
     return 1
 
 
@@ -889,7 +886,8 @@ def _close_due_positions(writer: _Writer, state: _RunState, session: date, as_of
             position.liq_value = -(85 if held == 1 else 100 + 6 * held)
             still_open.append(position)
             continue
-        close_net = _close_net(state.spec.mid_only)
+        losing = position.open_index % 4 == 2
+        close_net = _close_net(mid_only=state.spec.mid_only, losing=losing)
         forced = position.open_index % 9 == 0
         degraded = position.open_index % 11 == 0
         client_order_id = f"{position.position_id}-close-0"
@@ -919,9 +917,7 @@ def _close_due_positions(writer: _Writer, state: _RunState, session: date, as_of
                 "entry_ctx": None,
             },
         )
-        realised = {
-            band: (-close_net[band] - position.open_net[band]) * 100 * position.qty for band in ("orats", "worst", "mid")
-        }
+        realised = {band: (-close_net[band] - position.open_net[band]) * 100 * position.qty for band in ("orats", "worst", "mid")}
         fill_id = ids.fill_id(client_order_id, position.qty)
         writer.conn.execute("INSERT OR IGNORE INTO fill_ids (fill_id, seq) VALUES (?,?)", (fill_id, writer.seq + 1))
         writer.append(
@@ -943,7 +939,15 @@ def _close_due_positions(writer: _Writer, state: _RunState, session: date, as_of
                 legs=[
                     # a zero-bid sell-to-close leg: the normal state of a winning wing (10.4), sold at 0 on all bands
                     {"occ": f"{position.underlying}240119C00470000", "side": "sell", "bid": 0, "ask": 4, "orats": 0, "worst": 0, "mid": 0},
-                    {"occ": f"{position.underlying}240119C00450000", "side": "buy", "bid": 95, "ask": 115, "orats": 105, "worst": 110, "mid": 100},
+                    {
+                        "occ": f"{position.underlying}240119C00450000",
+                        "side": "buy",
+                        "bid": 95,
+                        "ask": 115,
+                        "orats": 105,
+                        "worst": 110,
+                        "mid": 100,
+                    },
                 ],
                 forced=forced,
                 quality="degraded" if degraded else "ok",
@@ -956,12 +960,15 @@ def _close_due_positions(writer: _Writer, state: _RunState, session: date, as_of
     state.open_positions = still_open
 
 
-def _close_net(mid_only: bool) -> dict[str, int]:
-    """Signed net of the closing fill (negative = credit received).
+def _close_net(*, mid_only: bool, losing: bool) -> dict[str, int]:
+    """Signed net of the closing fill (negative = credit received); the entry cost 105 / 110 / 100 per band.
 
-    The default run wins at every band; `mid_only` makes it win ONLY at mid - the configuration 10.3 labels
-    `REJECTED_MID_ONLY`, which the report has to refuse to celebrate.
+    One trade in four loses, so hit rate, average loss, profit factor and the drawdown have something to measure. The
+    default run is profitable at the headline band; `mid_only` makes it profitable ONLY at mid - the configuration 10.3
+    labels `REJECTED_MID_ONLY`, which the report has to refuse to celebrate.
     """
+    if losing:
+        return {"orats": -80, "worst": -75, "mid": -85}
     if mid_only:
         return {"orats": -100, "worst": -95, "mid": -120}
     return {"orats": -115, "worst": -112, "mid": -120}

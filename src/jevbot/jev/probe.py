@@ -451,7 +451,7 @@ def _suite_meta(session: _Session, states: Sequence[Mapping[str, Any]]) -> dict[
         verdict["pinned_matches"] = pinned.model == session.cfg.jev.model
         verdict["latency_ms"] = pinned.latency_ms
         verdict["request_chars"] = pinned.request_chars
-        verdict["input_tokens"] = pinned.input_tokens
+        verdict["pinned_input_tokens"] = pinned.input_tokens
         if pinned.input_tokens:
             # the chars/token calibration of `jev.spend.estimate_chars_per_token`, as an integer per-mille
             verdict["chars_per_token_milli"] = round(1000 * pinned.request_chars / pinned.input_tokens)
@@ -770,7 +770,7 @@ def run_suite(
         else:
             verdict = _suite_text(session, chosen)
         verdict["requests"] = session.requests
-        verdict["input_tokens"] = verdict.get("input_tokens", session.used_tokens)
+        verdict["input_tokens"] = session.used_tokens
         verdict["namespace"] = namespace
         if session.requests == 0:
             raise DeciderTransportError(f"the Step 0 suite {suite!r} sent no request (budget {max_tokens} tokens)")

@@ -229,6 +229,22 @@ _ORDINAL_RE: Final = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)\b", re.IGNORECASE)
 _SINCE_RE: Final = re.compile(rf"\bsince {re.escape(MASK_MONTH)}(?: {re.escape(MASK_YEAR)})?", re.IGNORECASE)
 _RECORD_RE: Final = re.compile(r"\brecord (?:high|low)\b|\ball-time\b", re.IGNORECASE)
 _repeat_cache: dict[str, tuple[tuple[re.Pattern[str], str], ...]] = {}
+_article_cache: dict[str, re.Pattern[str]] = {}
+
+
+def _phrases(terms: MaskTerms) -> list[str]:
+    return sorted({*terms.replacements.values(), MASK_LEVEL})
+
+
+def _absorb_articles(text: str, terms: MaskTerms) -> str:
+    """Every replacement phrase carries its own article ("the central bank", "a large company"), so an article the
+    source text put in front of the masked entity would double it ("the Federal Reserve" -> "the the central bank")."""
+    pattern = _article_cache.get(terms.version)
+    if pattern is None:
+        alternation = "|".join(re.escape(phrase) for phrase in _phrases(terms))
+        pattern = re.compile(rf"(?<![A-Za-z0-9])(?:the|an|a)\s+(?={alternation})", re.IGNORECASE)
+        _article_cache[terms.version] = pattern
+    return pattern.sub("", text)
 
 
 def _collapse_repeats(text: str, terms: MaskTerms) -> str:
@@ -237,8 +253,7 @@ def _collapse_repeats(text: str, terms: MaskTerms) -> str:
     keeps the sentence readable and keeps `mask` idempotent."""
     patterns = _repeat_cache.get(terms.version)
     if patterns is None:
-        phrases = sorted({*terms.replacements.values(), MASK_LEVEL})
-        patterns = tuple((re.compile(rf"{re.escape(phrase)}(?:\s+{re.escape(phrase)})+"), phrase) for phrase in phrases)
+        patterns = tuple((re.compile(rf"{re.escape(phrase)}(?:\s+{re.escape(phrase)})+"), phrase) for phrase in _phrases(terms))
         _repeat_cache[terms.version] = patterns
     for pattern, phrase in patterns:
         text = pattern.sub(phrase, text)
@@ -378,6 +393,7 @@ def mask(text: str, terms: MaskTerms, *, symbols: Sequence[str] = ()) -> str:
     out = _PERCENT_RE.sub(_magnitude, out)
     out = _NUMBER_RE.sub(MASK_NUMBER, out)
     out = _mask_proper_nouns(out)
+    out = _absorb_articles(out, terms)  # "the Federal Reserve" is "the central bank", not "the the central bank"
     out = _collapse_repeats(out, terms)  # "record high since [month]" is ONE notable level, "Apple (NASDAQ: AAPL)" ONE company
     return _SPACES_RE.sub(" ", out).strip()
 
