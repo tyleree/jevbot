@@ -3,6 +3,14 @@
 Keeping both here is what makes 6.8 step 6 true - "the result is then built from the just-stored rows (same code path as a
 hit)" - and it is why a recorded run and its replay can never disagree: exactly one function turns rows into answers, and it
 checks the model binding (INV-06) on every path, cache hits included.
+
+`dumps_answer` is `CachedAnswer.answer_json`'s spelling (2.5). DESIGN writes it as `canon.dumps_sorted(...)`, but an answer
+IS probabilities: `canon.dumps_sorted` refuses every float (INV-24: nothing HASHED INTO THE LEDGER may be a float), so the
+two statements cannot both hold. Resolved here, in the narrowest possible place: the same canonical spelling as
+`canon.dumps_sorted` - sorted keys, no spaces, `ensure_ascii=False`, `allow_nan=False` - with floats permitted. Nothing this
+encodes reaches hashed ledger material: `answer_json` feeds `answers.answer_sha256` and the cache manifest hash, both
+provenance digests of the run store's `meta` table, never the hash chain. A NaN / infinity probability is refused, so it can
+never be cached.
 """
 
 import json
@@ -14,7 +22,33 @@ from jevbot.errors import DeciderResponseError, InvariantError, ModelMismatchErr
 from jevbot.jev.stats import to_answers
 from jevbot.types import CachedAnswer, DecisionRequest, DecisionResult
 
-__all__ = ["cache_keys_for", "check_request_hashes", "result_from_rows"]
+__all__ = ["cache_keys_for", "check_request_hashes", "dumps_answer", "result_from_rows"]
+
+
+def _answer_walk(value: object, path: str) -> None:
+    """`canon`'s pre-walk with floats allowed: only JSON scalars, lists and str-keyed dicts may be cached."""
+    if value is None or type(value) in (str, int, bool, float):
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if type(key) is not str:
+                raise DeciderResponseError(f"answer JSON: dict key of type {type(key).__name__} at {path}")
+            _answer_walk(item, f"{path}.{key}")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _answer_walk(item, f"{path}[{index}]")
+        return
+    raise DeciderResponseError(f"answer JSON: unsupported value of type {type(value).__name__} at {path}")
+
+
+def dumps_answer(answer: object) -> str:
+    """The canonical text of ONE wire answer (`CachedAnswer.answer_json`): sorted keys, floats allowed, NaN refused."""
+    _answer_walk(answer, "$")
+    try:
+        return json.dumps(answer, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
+    except ValueError:  # allow_nan=False: a NaN / infinity probability is never cached
+        raise DeciderResponseError("answer JSON: a non-finite number cannot be cached") from None
 
 
 def cache_keys_for(model: str, req: DecisionRequest) -> dict[str, str]:

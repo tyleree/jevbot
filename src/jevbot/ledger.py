@@ -233,6 +233,7 @@ class SqliteLedger:
     def _autocommit(self) -> None:
         if self.commit_mode == "per_append":
             self._conn.commit()
+            self._uncommitted = 0
 
     @property
     def uncommitted(self) -> int:

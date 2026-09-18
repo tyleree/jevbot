@@ -740,24 +740,31 @@ def test_constant_climatological_forecaster_beats_raw_implied_but_fails_the_join
     recalibrated implied probability AND the expanding base rate rejects it.
     """
     rng = np.random.default_rng(20260917)
-    history = _history_frame(rng, n_sessions=400, start=0)
-    events = _events_frame(rng, n_sessions=250, start=401, p_forecast=0.12)
+    history = _history_frame(rng, n_sessions=1200, start=0)
+    # the climatological prior: the constant that a forecaster with no skill at all would quote
+    events = _events_frame(rng, n_sessions=250, start=1201, p_forecast=0.11)
 
     y = np.asarray(events["y"], dtype=float)
     p_const = np.asarray(events["p"], dtype=float)
     raw_implied = np.asarray(events["p_implied"], dtype=float)
 
-    # 1. D12 literal: positive BSS against the RAW implied probability - "not a verdict" (V11)
+    # 1. D12 literal: clearly positive BSS against the RAW implied probability - "not a verdict" (V11)
     bss_raw = cal.brier_skill(p_const, y, raw_implied)
-    assert bss_raw > 0.02, f"the synthetic risk premium is too small: BSS {bss_raw}"
+    assert bss_raw > 0.05, f"the synthetic risk premium is too small: BSS {bss_raw}"
 
     refs = cal.build_references(events, history, recal_min_events=250, base_rate_min_events=250, refit_sessions=21)
     assert bool(np.isfinite(refs["implied_recalibrated"]).all())
     assert bool(np.isfinite(refs["base_rate_expanding"]).all())
 
-    # 2. both references remove what the constant forecaster was exploiting
-    assert cal.brier(refs["implied_recalibrated"], y) < cal.brier(p_const, y)
-    assert cal.brier(refs["base_rate_expanding"], y) < cal.brier(p_const, y)
+    # 2. the two references remove exactly what the constant forecaster was exploiting: the risk premium and the
+    #    climatology.  Against them the same forecaster shows no skill worth speaking of.
+    assert float(np.mean(refs["base_rate_expanding"])) == pytest.approx(float(y.mean()), abs=0.02)
+    implied = np.asarray(events["p_implied"], dtype=float)
+    for level in IMPLIED_LEVELS:
+        rows = np.isclose(implied, level)
+        assert float(refs["implied_recalibrated"][rows].mean()) == pytest.approx(TRUE_P[level], abs=0.03)
+    assert abs(cal.brier_skill(p_const, y, refs["implied_recalibrated"])) < 0.015
+    assert abs(cal.brier_skill(p_const, y, refs["base_rate_expanding"])) < 0.015
 
     # 3. the pre-registered verdict: the look is evaluable and the joint test FAILS
     eligible = cal.eligible_sessions(
@@ -768,8 +775,10 @@ def test_constant_climatological_forecaster_beats_raw_implied_but_fails_the_join
     assert len(eligible) == 250
     look = cal.require_evaluable_look(eligible, n_sessions=120, look="look 1")
     bounds = _joint_test(events, refs, look, alpha=0.01)
-    assert bounds["implied_recalibrated"] <= 0.0
-    assert bounds["base_rate_expanding"] <= 0.0
+    # A climatological constant IS the expanding base rate, so against that reference it ties (and may narrowly win,
+    # the sampling noise of the estimate being a second-order Brier cost).  That is exactly why the pre-registration
+    # requires BOTH references: against the recalibrated implied probability the same forecaster shows nothing.
+    assert bounds["implied_recalibrated"] <= 0.0, bounds
     assert not all(bound > 0.0 for bound in bounds.values()), "the zero-skill forecaster passed the joint test"
 
 

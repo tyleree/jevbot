@@ -172,10 +172,11 @@ def test_absent_or_blank_credentials_are_refused(secrets: Secrets) -> None:
 
 def test_a_live_looking_key_is_refused_and_never_echoed() -> None:
     with pytest.raises(PaperGuardError) as caught:
-        paper_credentials(Secrets(alpaca_paper_key="AKLIVEKEY0001", secret := "x") if False else Secrets(alpaca_paper_key="AKLIVEKEY0001", alpaca_paper_secret="SK"))
+        paper_credentials(Secrets(alpaca_paper_key="AKLIVEKEY0001", alpaca_paper_secret="SKLIVESECRET"))
+
     message = str(caught.value)
-    assert "'AK'" in message
-    assert "AKLIVEKEY0001" not in message
+    assert "'AK'" in message  # the two-character hint is enough to diagnose it
+    assert "AKLIVEKEY0001" not in message and "SKLIVESECRET" not in message
 
 
 def test_a_paper_key_passes() -> None:
@@ -207,12 +208,22 @@ def test_a_missing_private_attribute_fails_closed(attribute: str) -> None:
         assert_client_surface(client)
 
 
-def test_the_pinned_wheel_still_carries_every_attribute_this_module_needs() -> None:
-    # the real class, not the double: an SDK bump that drops one of these must break here first
-    from alpaca.common.rest import RESTClient
+def test_the_pinned_wheel_itself_still_matches_what_section_11_1_assumes() -> None:
+    """The adapter-verification step of 11.1 as a regression test, against the REAL class (no request is made)."""
+    from alpaca.trading.client import TradingClient
 
-    source = RESTClient.__init__.__code__.co_names + RESTClient.__init__.__code__.co_varnames
-    assert all(name in source or name in ("_base_url",) for name in REQUIRED_CLIENT_ATTRS)
+    real = TradingClient(api_key="PKTESTDUMMY", secret_key="SKTESTDUMMYSECRET", paper=True)
+
+    assert base_url_of(real) == PAPER_BASE_URL  # `paper=True` alone selects the paper host
+    assert all(hasattr(real, name) for name in REQUIRED_CLIENT_ATTRS)
+    assert real._retry > 0  # the default we must turn off; `disable_sdk_retries` is what makes it exactly one request
+    assert 429 in real._retry_codes  # the statuses alpaca-py would blindly repeat a POST on (G5)
+    disable_sdk_retries(real)
+    assert real._retry == 0
+    # the account fields section 11.1 asked us to verify, on the real model
+    from alpaca.trading.models import TradeAccount
+
+    assert {"last_equity", "options_trading_level", "trade_suspended_by_user"} <= set(TradeAccount.model_fields)
 
 
 def test_disable_sdk_retries_sets_exactly_one_request() -> None:

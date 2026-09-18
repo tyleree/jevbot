@@ -363,7 +363,7 @@ def test_fees_follow_the_10_7_table_and_grow_with_size() -> None:
 
 def test_fees_refuse_a_leg_list_that_does_not_match_the_fill() -> None:
     chain, contracts = market()
-    planted = plant(chain, {contract: (100, 106) for contract in contracts})
+    planted = plant(chain, dict.fromkeys(contracts, (100, 106)))
     legs = [
         OrderLeg(contract=contracts[0], side=Side.BUY, position_intent=PositionIntent.BTO),
         OrderLeg(contract=contracts[1], side=Side.SELL, position_intent=PositionIntent.STO),

@@ -48,7 +48,7 @@ from jevbot.errors import (
     InvariantError,
     ModelMismatchError,
 )
-from jevbot.jev.common import cache_keys_for, check_request_hashes, result_from_rows
+from jevbot.jev.common import cache_keys_for, check_request_hashes, dumps_answer, result_from_rows
 from jevbot.jev.spend import TokenBucket
 from jevbot.jev.stats import to_answers
 from jevbot.protocols import DecisionCache, SpendLedger
@@ -164,7 +164,7 @@ class LiveJev:
                 request_kind=req.kind.value,
                 variant=req.variant.value,
                 # "exact wire bytes" are not recoverable from .json() and are not needed: a canonical re-encoding is
-                answer_json=canon.dumps_sorted(wire[qid]),
+                answer_json=dumps_answer(wire[qid]),
                 request_id=request_id,
                 input_tokens=input_tokens,
                 latency_ms=latency_ms,

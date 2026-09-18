@@ -326,7 +326,7 @@ class FakeTradingClient(FakeRestClient):
             raise api_error(404, 40410000, "order not found")
         return Order(**payload)
 
-    def get_orders(self, filter: GetOrdersRequest | None = None) -> list[Order]:  # noqa: A002 - the vendor's parameter name
+    def get_orders(self, filter: GetOrdersRequest | None = None) -> list[Order]:
         self._enter("get_orders")
         wanted = getattr(filter, "status", None) or QueryOrderStatus.OPEN
         rows = []
