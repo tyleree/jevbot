@@ -17,7 +17,8 @@ from typing import Any, Final
 
 import pytest
 
-from jevbot import canon, questions as questions_module, vocab
+from jevbot import canon, vocab
+from jevbot import questions as questions_module
 from jevbot.errors import ConfigError
 from jevbot.types import InfoClass, QuestionRole, RequestKind
 from tests.conftest import Goldens

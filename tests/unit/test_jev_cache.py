@@ -16,7 +16,8 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from jevbot import canon, ids, questions as questions_module
+from jevbot import canon, ids
+from jevbot import questions as questions_module
 from jevbot.cli import jev_cmds
 from jevbot.cli.main import GlobalOptions
 from jevbot.errors import ConfigError, InvariantError, ModelMismatchError
@@ -102,9 +103,7 @@ def test_the_same_key_in_two_namespaces_is_two_rows(cache: SqliteDecisionCache) 
     rows, state_json, questions_json = make_rows()
     put(cache, rows, state_json, questions_json)
     cache.ensure_namespace(OTHER_NAMESPACE, MODEL, RELEASE, refresh=False)
-    other = [
-        CachedAnswer(**{**{f: getattr(row, f) for f in row.__struct_fields__}, "namespace": OTHER_NAMESPACE}) for row in rows
-    ]
+    other = [CachedAnswer(**{**{f: getattr(row, f) for f in row.__struct_fields__}, "namespace": OTHER_NAMESPACE}) for row in rows]
     put(cache, other, state_json, questions_json)
     keys = [row.key for row in rows]
     assert len(cache.get_many(NAMESPACE, keys)) == len(rows)

@@ -675,6 +675,20 @@ class Registry:
         row = self._conn.execute("SELECT * FROM trials WHERE run_id = ?", (run_id,)).fetchone()
         return _trial_row(row) if row is not None else None
 
+    def require_trial(self, run_id: str) -> TrialRow:
+        """The trial row of `run_id`, or `EvalError`: **a run missing from the registry cannot be reported** (12.6).
+
+        The report writer calls this before it renders anything, so an unregistered run - a hand-started sweep point, a
+        re-run under a new id - can never become a number in a table.
+        """
+        row = self.trial(run_id)
+        if row is None:
+            raise EvalError(
+                f"run {run_id} is not in the trial registry; every run is registered BEFORE it starts and a run "
+                f"missing from the registry cannot be reported (12.6)"
+            )
+        return row
+
     def trials(self, *, family: str | None = None, namespace: str | None = None, status: str | None = None) -> list[TrialRow]:
         clauses: list[str] = []
         params: list[Any] = []

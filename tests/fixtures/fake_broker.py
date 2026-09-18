@@ -19,7 +19,9 @@ What it models (15.4):
 * scripted faults per call: `timeout_after_accept`, `504_after_accept` (accepted server-side, `BrokerAmbiguous` to us),
   `connection_reset` (not accepted), `403_bp` / `422_validation` (definitive `BrokerRejected`), `hang` (deadline),
   `late_post` (an abandoned call that lands on the next lookup);
-* `suspended` blocks closing orders too, which is why the kill sequence suspends strictly last (9.5 K6).
+* `suspended` blocks closing orders too, which is why the kill sequence suspends strictly last (9.5 K6);
+* `max_mleg_legs` refuses to trade a structure with more legs than that in ONE order, which is what drives the kill
+  sequence into its per-leg fallback (9.5 K4).
 
 Nothing here reads a clock, the network or a file; `now` is whatever the caller sets with `set_now()`.
 """
@@ -103,6 +105,7 @@ class FakeBroker:
     partial_rate: float = 0.0
     duplicate_accepted_twice: bool = False
     refuse_fills: bool = False
+    max_mleg_legs: int | None = None  # a broker that will not trade a structure with more legs than this in one order
     faults: dict[str, list[str]] = field(default_factory=dict)
     scripted_activities: list[BrokerActivity] = field(default_factory=list)
     now: datetime = datetime(2024, 5, 17, tzinfo=UTC)
@@ -292,6 +295,8 @@ class FakeBroker:
         order = record.order
         if order is None or self.refuse_fills or not self._marketable(order):
             return
+        if self.max_mleg_legs is not None and len(order.intent.legs) > self.max_mleg_legs:
+            return  # the whole structure cannot trade as one order: the kill sequence falls back to single legs (9.5 K4)
         if order.intent.equity_symbol is not None:
             self._fill_equity(record)
             return

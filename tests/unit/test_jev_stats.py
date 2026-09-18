@@ -67,7 +67,9 @@ def test_a_malformed_noul_fails_closed(wire: Any) -> None:
 
 
 def test_choice_statistics_are_the_hand_computed_ones() -> None:
-    answers = to_answers({"q": CHOICE_Q}, {"q": _choice({"alpha": 0.4, "beta": 0.3, "gamma": 0.2, "delta": 0.1}, choice="alpha", confidence=0.61)})
+    answers = to_answers(
+        {"q": CHOICE_Q}, {"q": _choice({"alpha": 0.4, "beta": 0.3, "gamma": 0.2, "delta": 0.1}, choice="alpha", confidence=0.61)}
+    )
     answer = answers["q"]
     assert isinstance(answer, ChoiceAns)
     assert answer.top == "alpha" and answer.p_top == pytest.approx(0.4)

@@ -188,6 +188,14 @@ def test_a_run_is_registered_once_and_resumed_afterwards(registry: reg.Registry)
         registry.set_status(meta.run_id, "running")
 
 
+def test_an_unregistered_run_cannot_be_reported(registry: reg.Registry) -> None:
+    with pytest.raises(EvalError, match="cannot be reported"):
+        registry.require_trial("20260101T000000-unknown")
+    meta = run_meta()
+    registry.register_trial(meta, git_commit=None, git_dirty=False)
+    assert registry.require_trial(meta.run_id).run_id == meta.run_id
+
+
 def test_results_need_a_registered_trial(registry: reg.Registry) -> None:
     with pytest.raises(EvalError, match="not registered"):
         registry.record_result("never-registered", n_days=10, ledger_head="h")

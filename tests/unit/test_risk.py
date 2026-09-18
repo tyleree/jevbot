@@ -782,11 +782,18 @@ def test_check_12_one_position_per_underlying_and_direction_a_cooldown_and_the_d
     verdict, order = approve(intent_of(NARROW), pf=held)
     assert order is None and not check(verdict, "dup_underlying_direction").passed
 
-    working = portfolio(working=(intent_of(NARROW),))
+    other_intent = msgspec.structs.replace(intent_of(NARROW), intent_id="jb1-bbbbbbbb-240517-eeeeeeeeeeee-open-00")
+    working = portfolio(working=(other_intent,))
     verdict, order = approve(intent_of(NARROW), pf=working)
     assert order is None and not check(verdict, "dup_underlying_direction").passed
 
-    _, approved_open = approve(intent_of(NARROW))
+    # a REPRICING attempt of the same intent is not blocked by its OWN working order (D18, INV-09)
+    reprice = portfolio(working=(intent_of(NARROW),))
+    verdict, order = approve(intent_of(NARROW), pf=reprice, attempt=1, limit=-248)
+    assert order is not None and order.attempt == 1 and check(verdict, "dup_underlying_direction").passed
+    assert check(verdict, "max_open_structures").observed == 0 and check(verdict, "max_new_per_day").observed == 0
+
+    _, approved_open = approve(other_intent)
     assert approved_open is not None
     verdict, order = approve(intent_of(NARROW), approved_so_far=(approved_open,))
     assert order is None and not check(verdict, "dup_underlying_direction").passed

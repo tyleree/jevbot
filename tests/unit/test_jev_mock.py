@@ -12,7 +12,8 @@ from typing import Any
 
 import pytest
 
-from jevbot import questions as questions_module, vocab
+from jevbot import questions as questions_module
+from jevbot import vocab
 from jevbot.errors import DeciderResponseError
 from jevbot.jev.mock import EVAL_CONSTANTS, MOCK_MODEL, MOCK_NAME, MockJev, mock_wire_answers
 from jevbot.jev.probe import _bucket_only, _key_perm
@@ -110,7 +111,7 @@ def test_structure_is_the_shared_direction_x_stance_mapping() -> None:
         assert answer.top == expected, f"{direction}/{stance} must map to {expected}"
     # a conflicting direction or an unclear stance can never produce a structure
     conflicting = state_with(**{"underlying.trend.direction": "mixed: x"})
-    assert getattr(answer_for("fit.structure_family", conflicting), "top") == "no_trade"
+    assert answer_for("fit.structure_family", conflicting).top == "no_trade"
 
 
 def test_regime_reads_the_trend_the_vol_percentile_and_the_term_structure() -> None:
@@ -142,18 +143,18 @@ def test_risk_environment_counts_the_stressed_codes() -> None:
         }
     )
     benign["events"]["inside_holding_window"] = []
-    assert getattr(answer_for("risk.environment", benign), "top") == 0
+    assert answer_for("risk.environment", benign).top == 0
     one = copy.deepcopy(benign)
     one["market"]["near_term_stress"] = "stressed: x"
-    assert getattr(answer_for("risk.environment", one), "top") == 1
+    assert answer_for("risk.environment", one).top == 1
     two = copy.deepcopy(one)
     two["underlying"]["range"]["realized_vol_change"] = "expanding_sharply: x"
-    assert getattr(answer_for("risk.environment", two), "top") == 2
+    assert answer_for("risk.environment", two).top == 2
     hostile = copy.deepcopy(two)
     hostile["market"]["vol_index_pctile_1y"]["bucket"] = "high: x"
     hostile["market"]["vol_term_structure"] = "backwardation: x"
     hostile["events"]["inside_holding_window"] = ["major central-bank rate decision in 2 sessions"]
-    top = getattr(answer_for("risk.environment", hostile), "top")
+    top = answer_for("risk.environment", hostile).top
     assert top == 3, "the level saturates at the last documented rubric level"
 
 
@@ -168,12 +169,12 @@ def test_under_stretched_reads_the_distance_code(code: str, expected: float) -> 
 
 def test_vol_explained_by_event_needs_both_a_listed_event_and_a_rich_iv_rank() -> None:
     rich = state_with(**{"vol_surface.iv_rank_1y": "high: x"})
-    assert getattr(answer_for("vol.explained_by_event", rich), "p") == pytest.approx(0.80)
+    assert answer_for("vol.explained_by_event", rich).p == pytest.approx(0.80)
     rich_no_event = copy.deepcopy(rich)
     rich_no_event["events"]["inside_holding_window"] = []
-    assert getattr(answer_for("vol.explained_by_event", rich_no_event), "p") == pytest.approx(0.10)
+    assert answer_for("vol.explained_by_event", rich_no_event).p == pytest.approx(0.10)
     cheap = state_with(**{"vol_surface.iv_rank_1y": "low: x"})
-    assert getattr(answer_for("vol.explained_by_event", cheap), "p") == pytest.approx(0.10)
+    assert answer_for("vol.explained_by_event", cheap).p == pytest.approx(0.10)
 
 
 def test_every_text_noul_answers_no() -> None:
@@ -190,14 +191,14 @@ def test_management_answers_come_from_the_pnl_short_distance_and_trend_change_co
     state = sample_state(RequestKind.MANAGE)
     answers = to_answers(questions_module.MANAGE_V1, mock_wire_answers(state, questions_module.MANAGE_V1))
     # the documented sample has trend `up` at entry and `mixed` now -> the thesis reads invalidated
-    assert getattr(answers["pos.thesis_invalidated"], "p") == pytest.approx(0.80)
-    assert getattr(answers["pos.short_strike_threat"], "top") == 1  # "about_one_move" -> Watch
+    assert answers["pos.thesis_invalidated"].p == pytest.approx(0.80)
+    assert answers["pos.short_strike_threat"].top == 1  # "about_one_move" -> Watch
     # "small_gain" is below the take-profit codes and the trend changed since entry -> the no-match label
-    assert getattr(answers["pos.action"], "top") == "unclear"
+    assert answers["pos.action"].top == "unclear"
 
     winning = copy.deepcopy(state)
     winning["position"]["pnl"] = "large_gain: x"
-    assert getattr(to_answers(questions_module.MANAGE_V1, mock_wire_answers(winning, questions_module.MANAGE_V1))["pos.action"], "top") == (
+    assert to_answers(questions_module.MANAGE_V1, mock_wire_answers(winning, questions_module.MANAGE_V1))["pos.action"].top == (
         "take_profit"
     )
 
@@ -205,16 +206,16 @@ def test_management_answers_come_from_the_pnl_short_distance_and_trend_change_co
     breached["position"]["short_strike_distance"] = "breached: x"
     breached["position"]["pnl"] = "large_loss: x"
     breached_answers = to_answers(questions_module.MANAGE_V1, mock_wire_answers(breached, questions_module.MANAGE_V1))
-    assert getattr(breached_answers["pos.short_strike_threat"], "top") == 3
-    assert getattr(breached_answers["pos.action"], "top") == "close_to_cut_loss"
+    assert breached_answers["pos.short_strike_threat"].top == 3
+    assert breached_answers["pos.action"].top == "close_to_cut_loss"
 
     steady = copy.deepcopy(state)
     steady["changes_since_entry"]["trend_now"] = steady["changes_since_entry"]["trend_at_entry"]
     steady["position"]["pnl"] = "flat: x"
     steady["position"]["short_strike_distance"] = "far: x"
     steady_answers = to_answers(questions_module.MANAGE_V1, mock_wire_answers(steady, questions_module.MANAGE_V1))
-    assert getattr(steady_answers["pos.thesis_invalidated"], "p") == pytest.approx(0.10)
-    assert getattr(steady_answers["pos.action"], "top") == "hold"
+    assert steady_answers["pos.thesis_invalidated"].p == pytest.approx(0.10)
+    assert steady_answers["pos.action"].top == "hold"
 
 
 def test_the_evaluation_nouls_are_the_fixed_base_rate_constants() -> None:
@@ -299,7 +300,7 @@ def test_the_decider_surface(tmp_path: Any) -> None:
     # the probe set answers too (the transport fixture serves the Step 0 suites with the same function)
     probe_req = make_request(RequestKind.PROBE)
     probe_result = MockJev().decide(probe_req)
-    assert getattr(probe_result.answers["probe.closed_higher_5s"], "p") == pytest.approx(0.5)
+    assert probe_result.answers["probe.closed_higher_5s"].p == pytest.approx(0.5)
 
 
 def test_the_wire_form_is_json_and_carries_the_score_legend() -> None:

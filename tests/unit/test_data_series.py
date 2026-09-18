@@ -3,6 +3,7 @@
 
 from datetime import UTC, date, datetime, timedelta
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -353,8 +354,14 @@ def test_a_news_frame_is_read_like_the_archive_parquet() -> None:
     got = source.items("SPY", datetime(2024, 5, 17, 20, 0, tzinfo=UTC), 24)
     assert len(got) == 1 and got[0].symbols == ("SPY", "QQQ") and got[0].summary is None and got[0].received_at is None
     assert got[0].knowable_at == created and source.covered("SPY", date(2024, 5, 17))
+    # a CSV archive stores the symbols as a comma-separated string and a received_at
+    as_csv = frame.assign(symbols=["SPY,QQQ"], received_at=pd.to_datetime([created]), summary=["a summary"])
+    item = TableNewsSource(as_csv).items("SPY", datetime(2024, 5, 17, 20, 0, tzinfo=UTC), 24)[0]
+    assert item.symbols == ("SPY", "QQQ") and item.received_at == created and item.summary == "a summary"
     with pytest.raises(DataError, match="missing columns"):
         TableNewsSource(frame.drop(columns=["headline"]))
+    with pytest.raises(DataError, match="coverage frame is missing columns"):
+        TableNewsSource(frame, coverage.drop(columns=["start"]))
 
 
 def test_the_null_news_source_is_never_covered() -> None:

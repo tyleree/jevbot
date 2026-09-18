@@ -14,7 +14,8 @@ import msgspec
 import pytest
 from typer.testing import CliRunner
 
-from jevbot import canon, questions as questions_module, vocab
+from jevbot import canon, vocab
+from jevbot import questions as questions_module
 from jevbot.cli import jev_cmds
 from jevbot.cli.main import GlobalOptions
 from jevbot.config import Config, JevSpendConfig
@@ -388,8 +389,6 @@ def test_show_request_uses_the_injected_preview_builder(data_dir: Path, monkeypa
 def test_show_request_refuses_unmasked_outside_a_diagnostic_run(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(jev_cmds, "_load_preview_request", lambda: lambda cfg, **kwargs: None)
     options = GlobalOptions(overrides=(f"paths.data_dir={data_dir}", "state.unmasked=true"))
-    result = CliRunner().invoke(
-        jev_cmds.app, ["show-request", "--underlying", "SPY", "--session", "2024-05-17"], obj=options
-    )
+    result = CliRunner().invoke(jev_cmds.app, ["show-request", "--underlying", "SPY", "--session", "2024-05-17"], obj=options)
     assert result.exit_code != 0
     assert "unmasked" in str(result.exception or result.output)

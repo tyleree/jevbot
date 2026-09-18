@@ -16,7 +16,8 @@ from typing import Final
 
 import pytest
 
-from jevbot import canon, questions as questions_module
+from jevbot import canon
+from jevbot import questions as questions_module
 from jevbot.jev.cache import SCHEMA_SQL, SqliteDecisionCache
 from jevbot.types import CachedAnswer
 
@@ -42,20 +43,26 @@ def _sql_literals(path: Path) -> list[str]:
 
 def test_no_source_file_writes_to_the_answers_table() -> None:
     offenders: list[str] = []
+    checked = 0
     for path in sorted(SRC.rglob("*.py")):
-        for literal in _string_literals(path):
+        for literal in _sql_literals(path):
+            checked += 1
             if _FORBIDDEN.search(literal):
                 offenders.append(f"{path.relative_to(SRC)}: {literal.strip()[:80]}")
+    assert checked > 10, "the guard really did read the SQL of src/ (it must not pass vacuously)"
     assert offenders == [], "the decision cache is immutable and never evicted (13.3)"
 
 
 def test_the_cache_module_never_drops_a_trigger_or_a_table() -> None:
     # the only destructive-looking statements in jev/cache.py must be the trigger BODIES the schema installs
-    literals = _string_literals(SRC / "jev" / "cache.py")
+    literals = _sql_literals(SRC / "jev" / "cache.py")
+    assert literals, "jev/cache.py does contain SQL"
     for literal in literals:
-        if literal is SCHEMA_SQL or "CREATE TRIGGER" in literal:
+        if "CREATE TRIGGER" in literal:
             continue
         assert not _ANY_DESTRUCTIVE.search(literal), f"jev/cache.py must not write destructive SQL: {literal[:80]}"
+    assert any("CREATE TRIGGER" in literal for literal in literals)
+    assert SCHEMA_SQL in literals or any("CREATE TABLE IF NOT EXISTS answers" in literal for literal in literals)
 
 
 def test_the_shipped_schema_installs_both_triggers() -> None:
@@ -92,13 +99,17 @@ def test_the_triggers_abort_even_on_a_raw_connection(tmp_path: Path) -> None:
         created_at=datetime(2026, 9, 17, 20, 0, tzinfo=UTC),
     )
     cache.put_request(
-        namespace, [row], canon.dumps_ordered(state), canon.dumps_ordered({"regime.market": question}), (date(2024, 5, 17), "SPY", "entry", "base")
+        namespace,
+        [row],
+        canon.dumps_ordered(state),
+        canon.dumps_ordered({"regime.market": question}),
+        (date(2024, 5, 17), "SPY", "entry", "base"),
     )
     before = cache.manifest_hash(namespace)
     raw = sqlite3.connect(path)
     try:
         with pytest.raises(sqlite3.IntegrityError, match="cache is immutable"):
-            raw.execute("UPDATE answers SET answer_json = '{\"noul\":0.9,\"type\":\"noul\"}'")
+            raw.execute('UPDATE answers SET answer_json = \'{"noul":0.9,"type":"noul"}\'')
         with pytest.raises(sqlite3.IntegrityError, match="cache is never evicted"):
             raw.execute("DELETE FROM answers WHERE 1=1")
         raw.rollback()

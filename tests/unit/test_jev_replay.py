@@ -14,7 +14,8 @@ from pathlib import Path
 import msgspec
 import pytest
 
-from jevbot import canon, questions as questions_module
+from jevbot import canon
+from jevbot import questions as questions_module
 from jevbot.config import Config
 from jevbot.errors import CacheMissError, ModelMismatchError
 from jevbot.jev.cache import SqliteDecisionCache
@@ -34,9 +35,7 @@ def record(tmp_path: Path, kinds: tuple[RequestKind, ...] = (RequestKind.ENTRY,)
     cache.ensure_namespace(NAMESPACE, cfg.model, RELEASE, refresh=False)
     spend = SpendGuard(tmp_path / "state" / "spend.sqlite", scope=SCOPE_BATCH, cfg=cfg.spend)
     calls: list[dict[str, object]] = []
-    jev = LiveJev(
-        cfg, cache, spend, api_key="dummy", run_id="rec", mode=CacheMode.RECORD, transport=make_jev_transport(calls=calls)
-    )
+    jev = LiveJev(cfg, cache, spend, api_key="dummy", run_id="rec", mode=CacheMode.RECORD, transport=make_jev_transport(calls=calls))
     for kind in kinds:
         jev.decide(make_request(kind))
     jev.close()
@@ -127,7 +126,9 @@ def test_the_model_is_verified_on_a_hit(tmp_path: Path) -> None:
         )
         for qid, question in req.questions.items()
     ]
-    cache.put_request(namespace, rows, canon.dumps_ordered(req.state), canon.dumps_ordered(req.questions), (SESSION, "SPY", "entry", "base"))
+    cache.put_request(
+        namespace, rows, canon.dumps_ordered(req.state), canon.dumps_ordered(req.questions), (SESSION, "SPY", "entry", "base")
+    )
     try:
         replay = ReplayJev(Config().jev, cache)  # pinned model = jev-1.13.0 = the requested one, so every key HITS
         with pytest.raises(ModelMismatchError, match="INV-06"):

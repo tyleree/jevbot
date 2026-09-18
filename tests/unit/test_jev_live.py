@@ -14,6 +14,7 @@ blocks the network anyway). What is pinned here is what 6.8 promises:
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -25,7 +26,8 @@ from typing import Any
 import msgspec
 import pytest
 
-from jevbot import canon, questions as questions_module
+from jevbot import canon
+from jevbot import questions as questions_module
 from jevbot.config import Config, JevConfig, JevSpendConfig
 from jevbot.errors import (
     ConfigError,
@@ -147,7 +149,7 @@ def test_a_cache_hit_makes_zero_http_calls_and_still_verifies_the_model(tmp_path
         second = rig.jev.decide(req)
         assert len(rig.calls) == 1, "the second decide() is answered from the cache"
         assert second.source == "cache"
-        assert {qid: answer for qid, answer in second.answers.items()} == first.answers
+        assert second.answers == first.answers
         assert second.cache_keys == first.cache_keys and second.request_id == REQUEST_ID
         # INV-06 on the hit path: a namespace whose rows came from another model can never answer for this one
         other = msgspec.structs.replace(rig.jev.cfg, model="jev-1.14.0")
@@ -206,7 +208,7 @@ def test_usage_none_falls_back_to_the_estimate(tmp_path: Path) -> None:
 def test_a_model_mismatch_raises_and_caches_nothing(tmp_path: Path) -> None:
     rig = make_rig(tmp_path, model="jev-1.14.0")
     try:
-        with pytest.raises(ModelMismatchError, match="jev-1.14.0"):
+        with pytest.raises(ModelMismatchError, match=re.escape("jev-1.14.0")):
             rig.jev.decide(make_request())
         assert rig.cache.stats()["answers"] == 0
         assert len(rig.calls) == 1 and rig.spend.totals("run-1")[0] == 1234, "the answered request is still billed"
@@ -298,7 +300,7 @@ def test_a_probability_sum_outside_the_band_is_kept_not_refused(tmp_path: Path) 
     try:
         result = rig.jev.decide(make_request())
         answer = result.answers["regime.market"]
-        assert getattr(answer, "raw_sum") == pytest.approx(0.96)
+        assert answer.raw_sum == pytest.approx(0.96)
     finally:
         rig.close()
 
@@ -381,7 +383,7 @@ def test_replay_mode_never_constructs_a_client(tmp_path: Path) -> None:
 
 def test_a_pinned_sdk_version_mismatch_is_refused(tmp_path: Path) -> None:
     cfg = msgspec.structs.replace(Config().jev, sdk_version="0.5.0")
-    with pytest.raises(ConfigError, match="0.5.0"):
+    with pytest.raises(ConfigError, match=re.escape("0.5.0")):
         make_rig(tmp_path, jev_cfg=cfg)
 
 
