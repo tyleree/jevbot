@@ -114,6 +114,8 @@ class LiveJev:
         self.cache = cache
         self.spend = spend
         self.run_id = run_id
+        # `record` and `refresh` behave identically HERE: a refresh generation is a new (empty) namespace, and the caller
+        # creates it with `ensure_namespace(..., refresh=True)` at run start (6.8). `replay` never gets this far.
         self.mode = mode
         self.last_response_detail: str | None = None  # the 422 `detail`, for the caller's sidecar; NEVER logged
         self._sleep = sleep

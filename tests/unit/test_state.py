@@ -265,6 +265,10 @@ def _three_slot_worlds() -> tuple[FakeView, FakeView]:
 def test_entry_state_3slot_golden_equals_the_collapsed_fixture(builder: StateBuilder, goldens: Any) -> None:
     """5.4: the same 30 sessions with three slots and collapsed to the designated slot give the same state."""
     three, collapsed = _three_slot_worlds()
+    # the two archives really take different paths through the 5.4 read rule
+    assert set(three.daily("SPY", 30)["slot"][:-1]) == {Slot.DEC.value}
+    assert set(collapsed.daily("SPY", 30)["slot"][:-1]) == {Slot.EOD.value}  # designated slot missing -> `eod` fallback
+    assert three.daily("SPY", 30)["slot"].iloc[-1] == collapsed.daily("SPY", 30)["slot"].iloc[-1] == Slot.DEC.value
     built = builder.entry(three, "SPY")
     same = builder.entry(collapsed, "SPY")
     assert built is not None and same is not None

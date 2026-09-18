@@ -254,7 +254,19 @@ class BandFillModel:
     # --- shared plumbing ------------------------------------------------------------------------------------------------
 
     @staticmethod
-    def _legs(legs: Sequence[OrderLeg], chain: ChainSnapshot) -> list[OrderLeg]:
+    def _unit_ratio(leg: OrderLeg) -> None:
+        """v1 order legs have `ratio == 1` (2.3 / 2.4; risk check 4 of 9.1 admits no other structure).
+
+        `LegFill` (2.4) carries no ratio, so `net_of` could not weight a ratio leg and a ledger replay could not recover it:
+        such a leg is refused outright rather than counted once in the net and twice in the mark and the fee.
+        """
+        if isinstance(leg.ratio, bool) or leg.ratio != 1:
+            raise InvariantError(
+                f"fills: order leg {leg.contract.occ} has ratio {leg.ratio!r}; v1 ratios are 1 (2.4) and LegFill carries no ratio"
+            )
+
+    @classmethod
+    def _legs(cls, legs: Sequence[OrderLeg], chain: ChainSnapshot) -> list[OrderLeg]:
         checked = list(legs)
         if not checked:
             raise InvariantError("fills: an order has at least one leg")
@@ -263,8 +275,7 @@ class BandFillModel:
                 raise InvariantError(f"fills: legs must be OrderLeg, got {type(leg).__name__}")
             if leg.contract.underlying != chain.underlying:
                 raise InvariantError(f"fills: leg {leg.contract.occ} priced against a {chain.underlying} chain (a wiring bug)")
-            if isinstance(leg.ratio, bool) or leg.ratio < 1:
-                raise InvariantError(f"fills: leg {leg.contract.occ} has ratio {leg.ratio!r}; v1 ratios are 1")
+            cls._unit_ratio(leg)
         return checked
 
     def _tick(self, underlying: str, px: Cents) -> int:
@@ -309,6 +320,8 @@ class BandFillModel:
     def check(self, legs: Sequence[OrderLeg], qty: int, chain: ChainSnapshot, *, mandatory: bool) -> tuple[str, ...]:
         """`vocab.FILL_REJECTS` codes in their fixed order, deduplicated across legs; `()` = fillable. Band-independent (10.4).
 
+        Every rule is evaluated independently, so one leg can carry several codes (a BUY quoted `100 x 0` is `no_quote` -
+        rule (a), no ask - and `crossed_or_locked`); `check` returns a tuple precisely so each reason reaches the funnel.
         `mandatory=True` always returns `()`: a mandatory exit / kill order is never rejected (it is force-priced instead).
         """
         if mandatory:
@@ -322,11 +335,11 @@ class BandFillModel:
             if q is None:
                 codes.add(_REJECT_MISSING)
                 continue
-            contracts = n * leg.ratio
+            contracts = n  # `_legs` has pinned every ratio to 1, so `contracts = qty * n_legs` counts each leg once (10.7)
+            if _is_no_quote(leg, q):
+                codes.add(_REJECT_NO_QUOTE)  # a BUY without an ask, or a SELL-to-open into a zero bid (never a zero-bid sell-to-close)
             if _is_crossed(q):
                 codes.add(_REJECT_CROSSED)
-            elif not _usable_on_side(leg, q):
-                codes.add(_REJECT_NO_QUOTE)  # a BUY without an ask, or a SELL-to-open into a zero bid (never a zero-bid sell-to-close)
             if not _is_zero_bid_close(leg, q) and self._too_wide(q):
                 codes.add(_REJECT_WIDE_SPREAD)
             size = q.ask_size if leg.side is Side.BUY else q.bid_size  # the side we hit
@@ -357,7 +370,7 @@ class BandFillModel:
         optional "last leg mark" of the BUY fallback; without it the row's own prices stand in (see `_no_quote_price`).
         """
         checked = self._legs(legs, chain)
-        p_bp = self.p_bp(sum(leg.ratio for leg in checked))
+        p_bp = self.p_bp(len(checked))  # 10.3's leg class is the NUMBER of legs (every ratio is 1, `_legs` refuses the rest)
         fills: list[LegFill] = []
         degraded = False
         for leg in checked:
@@ -381,7 +394,14 @@ class BandFillModel:
 
     # --- FillModel: liquidation ----------------------------------------------------------------------------------------
 
-    def liquidation(self, structure: Structure, chain: ChainSnapshot, last: tuple[int, int] | None) -> tuple[int, int, bool]:
+    def liquidation(
+        self,
+        structure: Structure,
+        chain: ChainSnapshot,
+        last: tuple[int, int] | None,
+        *,
+        last_asks: Mapping[str, int] | None = None,
+    ) -> tuple[int, int, bool]:
         """`(liq_value, mid_value, stale)` in signed cents/share: what closing would COST now (negative = we would receive).
 
         `liq_value = sum(ask of short legs) - sum(bid of long legs)`; `mid_value` at mids, rounded against us (a short leg's mid
@@ -389,8 +409,12 @@ class BandFillModel:
         is unusable only when its quote is missing, a short leg has no ask, or the quote is crossed / locked with a positive bid;
         then `stale = True` and the previous `last = (liq_value, mid_value)` is returned unchanged. With `last = None` (no previous
         mark, or the caller has retired one after `health.max_stale_mark_sessions`) the fallback bound of 10.5 prices the unusable
-        legs instead - long at intrinsic, short at `max(intrinsic, last ask)` with the row's own prices as the last ask - while
-        usable legs keep their real quotes.
+        legs instead - long at intrinsic, short at `max(intrinsic, last ask)` - while usable legs keep their real quotes.
+
+        `last_asks` (occ -> the last ask we saw for that leg, cents) is 10.5's "last ask"; it is an extension of the `FillModel`
+        Protocol (3.4 passes only the structure-level `last`), so without it the most conservative price visible on the row itself
+        stands in - which is the BID when a short leg is quoted `bid x 0`, and therefore possibly OPTIMISTIC about what closing
+        that leg costs. Each leg is weighted by `Leg.ratio` (always 1 in v1), so the mark stays correct if ratios are admitted.
         """
         if not isinstance(structure, Structure) or not structure.legs:
             raise InvariantError("fills: liquidation needs a Structure with at least one leg")
@@ -416,9 +440,10 @@ class BandFillModel:
             stale = True
             if last is not None:
                 continue
-            if short:  # the fallback bound: short = max(intrinsic, last ask) - the most conservative price visible
+            if short:  # the fallback bound of 10.5: short = max(intrinsic, last ask); the row's own prices stand in without one
                 seen = 0 if q is None else max(q.bid, q.ask, 0)
-                bound = max(intrinsic_cents(leg.contract, chain.spot, up=True), seen)
+                prior = 0 if last_asks is None else max(_int(last_asks.get(leg.contract.occ, 0), "last_asks[occ]"), 0)
+                bound = max(intrinsic_cents(leg.contract, chain.spot, up=True), prior, seen)
                 liq += bound * ratio
                 mid += bound * ratio
             else:  # long = intrinsic
@@ -436,7 +461,8 @@ class BandFillModel:
 
         `contracts = qty * n_legs`, `sold = qty * n_sell_legs`, `sell_notional_cents = sum(headline leg price * 100 * qty)` over
         the SELL legs (the headline band: `orats` under `next_snapshot`, `worst` under `same_snapshot_worst`). `leg_fills` must be
-        aligned with `legs` (same occ and side): a mismatch is a wiring bug.
+        aligned with `legs` (same occ and side): a mismatch is a wiring bug. Every leg counts once - v1 ratios are 1 and any other
+        ratio is refused here exactly as it is in `price` / `check`, so the fee can never count a leg the net does not.
         """
         n = _int(qty, "qty")
         if n < 1:
@@ -451,7 +477,8 @@ class BandFillModel:
                 raise InvariantError(
                     f"fills: leg fill {fill.occ}/{fill.side.value} does not match order leg {leg.contract.occ}/{leg.side.value}"
                 )
-            count = n * leg.ratio
+            self._unit_ratio(leg)
+            count = n
             contracts += count
             if leg.side is Side.SELL:
                 sold += count

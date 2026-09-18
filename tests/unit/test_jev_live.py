@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -446,5 +447,29 @@ def test_every_request_kind_and_variant_round_trips(tmp_path: Path) -> None:
         # permuted variant has the same content keys and is answered from the cache (D8: the key IS the content)
         assert len(rig.calls) == 6
         assert rig.cache.stats()["requests"] == 6
+    finally:
+        rig.close()
+
+
+def test_decide_is_thread_safe(tmp_path: Path) -> None:
+    """3.3: `decide_batch` calls `decide` from a small thread pool, so one client, one cache and one guard are shared."""
+    rig = make_rig(tmp_path)
+    try:
+        requests = []
+        for index in range(12):
+            state = make_request().state
+            state["market"]["as_of"] = f"prior session close, sample {index}"
+            requests.append(make_request(state=state))
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(rig.jev.decide, requests))
+        assert [result.state_hash for result in results] == [req.state_hash for req in requests]
+        assert all(result.source == "live" and len(result.answers) == 19 for result in results)
+        assert len(rig.calls) == 12
+        assert rig.cache.stats()["answers"] == 12 * 19 and rig.cache.stats()["requests"] == 12
+        assert rig.spend.reservations("run-1") == 12
+        # every request is answered from the cache the second time round, from several threads at once
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            again = list(pool.map(rig.jev.decide, requests))
+        assert all(result.source == "cache" for result in again) and len(rig.calls) == 12
     finally:
         rig.close()

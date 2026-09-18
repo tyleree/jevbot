@@ -154,6 +154,76 @@ def _resampled(x: FloatArray, indices: IntArray) -> FloatArray:
     return np.asarray(x[indices], dtype=np.float64)
 
 
+class Interval(tuple[float, float, float]):
+    """`(point, ci_lo, ci_hi)` - the plain 3-tuple of the 12.5 signature, plus the replicate bookkeeping.
+
+    `n_degenerate` counts the replicates on which the **statistic** was undefined.  It can never be caused by a
+    non-finite observation: every series is checked up front (`_require_finite`), because 12.1 `missing` requires void /
+    unscorable sessions to be *excluded and listed* by the caller rather than dropped, replicate by replicate, inside
+    the resampler - silently taking the bound over the surviving replicates is a selection-biased answer to a
+    pre-registered go / no-go question.
+    """
+
+    reps: int
+    n_degenerate: int
+
+    def __new__(cls, point: float, lo: float, hi: float, *, reps: int, n_degenerate: int = 0) -> Interval:
+        self = tuple.__new__(cls, (float(point), float(lo), float(hi)))
+        self.reps = int(reps)
+        self.n_degenerate = int(n_degenerate)
+        return self
+
+    @property
+    def point(self) -> float:
+        return self[0]
+
+    @property
+    def ci_lo(self) -> float:
+        return self[1]
+
+    @property
+    def ci_hi(self) -> float:
+        return self[2]
+
+
+def _require_finite(x: FloatArray, name: str) -> None:
+    """Refuse a series that carries a non-finite observation, naming the positions (12.1 `missing`).
+
+    `eval.calibration.loss_differential` yields `NaN` for a session on which a primary question has no usable row, and
+    `eligible_sessions` still calls that session eligible (eligibility is defined on reference availability alone,
+    12.1 `eligible_session`).  Such a session must be dropped **and listed** by the caller - see
+    `eval.calibration.exclude_unscorable_sessions` - never absorbed by a replicate filter.
+    """
+    bad = np.flatnonzero(~np.isfinite(x))
+    if bad.size == 0:
+        return
+    shown = ", ".join(str(int(i)) for i in bad[:20].tolist())
+    more = "" if bad.size <= 20 else f", ... ({int(bad.size)} in total)"
+    raise EvalError(
+        f"{name} is non-finite at positions [{shown}]{more}: exclude and list those sessions before taking a bound "
+        "(12.1 `missing`; `jevbot.eval.calibration.exclude_unscorable_sessions` does the split)"
+    )
+
+
+def _check_degenerate(n_degenerate: int, total: int, max_frac: float, what: str) -> None:
+    """Refuse a bound taken over a materially selection-biased subset of the replicates.
+
+    The default `max_degenerate_frac = 0.0` is fail-closed: with a finite input series the mean - the pre-registered
+    statistic - can never be undefined, so a dropped replicate means a *statistic* that is undefined on some resamples
+    and the caller has to opt into tolerating it.
+    """
+    if not 0.0 <= max_frac < 1.0:
+        raise EvalError(f"max_degenerate_frac must be in [0, 1): {max_frac!r}")
+    if n_degenerate and n_degenerate > max_frac * total:
+        raise EvalError(
+            f"the statistic was undefined on {n_degenerate} of {total} {what} replicates (allowed: {max_frac:.1%}): "
+            "the surviving replicates are a selection-biased subset of the bootstrap distribution - fix the statistic, "
+            "or raise `max_degenerate_frac` deliberately and report `Interval.n_degenerate`"
+        )
+    if n_degenerate >= total:
+        raise EvalError(f"every {what} replicate was degenerate")
+
+
 def bootstrap_ci(
     x: npt.ArrayLike,
     stat: Callable[[FloatArray], float] = _mean,
@@ -165,17 +235,23 @@ def bootstrap_ci(
     one_sided: bool = False,
     method: CiMethod = "percentile",
     se_fn: Callable[[FloatArray], float] | None = None,
-) -> tuple[float, float, float]:
-    """`(point, ci_lo, ci_hi)` of `stat` under the stationary bootstrap (12.5).
+    max_degenerate_frac: float = 0.0,
+) -> Interval:
+    """`(point, ci_lo, ci_hi)` of `stat` under the stationary bootstrap (12.5) - an `Interval`, i.e. a 3-tuple.
 
     `block=None` uses `default_block(n)`.  `one_sided=True` returns a one-sided LOWER bound (`ci_hi = +inf`).
     `method="studentised"` is the bootstrap-t: it needs a standard-error function for the statistic and defaults to the
     block-based `block_se` of the mean, which is what the pre-registered `d_t` test uses (12.3).
+
+    `x` must be finite: an unscorable session is excluded and listed by the caller (12.1 `missing`), never absorbed by
+    the resampler.  `max_degenerate_frac` is the only tolerance, and it concerns a `stat` that is undefined on some
+    resamples - never the input.
     """
     arr = np.asarray(x, dtype=np.float64).ravel()
     n = int(arr.size)
     if n < 2:
         raise EvalError(f"the bootstrap needs at least 2 observations, got {n}")
+    _require_finite(arr, "x")
     alpha = _check_level(level)
     width = float(block) if block is not None else default_block(n)
     indices = stationary_bootstrap_indices(n, width, reps, rng)
@@ -186,12 +262,19 @@ def bootstrap_ci(
             draws = np.asarray(arr[indices].mean(axis=1), dtype=np.float64)
         else:
             draws = np.asarray([stat(_resampled(arr, indices[b])) for b in range(reps)], dtype=np.float64)
-        usable = draws[np.isfinite(draws)]
-        if usable.size == 0:
-            raise EvalError("every bootstrap replicate was non-finite")
+        finite = np.isfinite(draws)
+        n_degenerate = int(draws.size - int(finite.sum()))
+        _check_degenerate(n_degenerate, int(draws.size), max_degenerate_frac, "bootstrap")
+        usable = np.asarray(draws[finite], dtype=np.float64)
         if one_sided:
-            return (point, float(np.quantile(usable, alpha)), float("inf"))
-        return (point, float(np.quantile(usable, alpha / 2.0)), float(np.quantile(usable, 1.0 - alpha / 2.0)))
+            return Interval(point, float(np.quantile(usable, alpha)), float("inf"), reps=reps, n_degenerate=n_degenerate)
+        return Interval(
+            point,
+            float(np.quantile(usable, alpha / 2.0)),
+            float(np.quantile(usable, 1.0 - alpha / 2.0)),
+            reps=reps,
+            n_degenerate=n_degenerate,
+        )
 
     if method != "studentised":
         raise EvalError(f"unknown interval method {method!r}")
@@ -207,15 +290,19 @@ def bootstrap_ci(
         theta_b = float(stat(sample))
         if math.isfinite(se_b) and se_b > 0.0 and math.isfinite(theta_b):
             tstats.append((theta_b - point) / se_b)
-    if not tstats:
-        raise EvalError("every studentised bootstrap replicate was degenerate")
+    n_degenerate = reps - len(tstats)
+    _check_degenerate(n_degenerate, reps, max_degenerate_frac, "studentised bootstrap")
     t = np.asarray(tstats, dtype=np.float64)
     if one_sided:
-        return (point, point - float(np.quantile(t, 1.0 - alpha)) * se, float("inf"))
-    return (
+        return Interval(
+            point, point - float(np.quantile(t, 1.0 - alpha)) * se, float("inf"), reps=reps, n_degenerate=n_degenerate
+        )
+    return Interval(
         point,
         point - float(np.quantile(t, 1.0 - alpha / 2.0)) * se,
         point - float(np.quantile(t, alpha / 2.0)) * se,
+        reps=reps,
+        n_degenerate=n_degenerate,
     )
 
 
@@ -241,12 +328,18 @@ def lower_bound(
 
     In every case the pre-registered rejection rule is the same: the look succeeds against a reference when this bound
     is `> 0`.
+
+    All three methods refuse a non-finite `d_t` alike (12.1 `missing`: an unscorable session is excluded and listed by
+    the caller with `eval.calibration.exclude_unscorable_sessions`, never averaged away inside the resampler) - the
+    three pre-registered interval candidates must agree about whether the data are usable, or the verdict would depend
+    on which of them `eval power` happened to choose.
     """
     if not 0.0 < alpha < 1.0:
         raise EvalError(f"alpha must be in (0, 1): {alpha!r}")
     arr = np.asarray(x, dtype=np.float64).ravel()
     if int(arr.size) < 2:
         raise EvalError(f"the bootstrap needs at least 2 observations, got {arr.size}")
+    _require_finite(arr, "d_t")
 
     if interval == "null_calibrated":
         if null_critical is None or not math.isfinite(null_critical):
@@ -282,11 +375,12 @@ def paired_bootstrap_ci(
     level: float,
     rng: np.random.Generator,
     one_sided: bool = False,
-) -> tuple[float, float, float]:
+    max_degenerate_frac: float = 0.0,
+) -> Interval:
     """Paired percentile interval: **the same resampling indices** are applied to both series (12.5).
 
     This is how the headline paired differences are formed (Jev versus baseline 3, B7.6): resampling the two series
-    independently would destroy the pairing and widen the interval.
+    independently would destroy the pairing and widen the interval.  Both series must be finite (12.1 `missing`).
     """
     aa = np.asarray(a, dtype=np.float64).ravel()
     bb = np.asarray(b, dtype=np.float64).ravel()
@@ -295,17 +389,26 @@ def paired_bootstrap_ci(
     n = int(aa.size)
     if n < 2:
         raise EvalError(f"the bootstrap needs at least 2 observations, got {n}")
+    _require_finite(aa, "a")
+    _require_finite(bb, "b")
     alpha = _check_level(level)
     width = float(block) if block is not None else default_block(n)
     indices = stationary_bootstrap_indices(n, width, reps, rng)
     point = float(stat(aa, bb))
     draws = np.asarray([stat(_resampled(aa, indices[i]), _resampled(bb, indices[i])) for i in range(reps)], dtype=np.float64)
-    usable = draws[np.isfinite(draws)]
-    if usable.size == 0:
-        raise EvalError("every paired bootstrap replicate was non-finite")
+    finite = np.isfinite(draws)
+    n_degenerate = int(draws.size - int(finite.sum()))
+    _check_degenerate(n_degenerate, int(draws.size), max_degenerate_frac, "paired bootstrap")
+    usable = np.asarray(draws[finite], dtype=np.float64)
     if one_sided:
-        return (point, float(np.quantile(usable, alpha)), float("inf"))
-    return (point, float(np.quantile(usable, alpha / 2.0)), float(np.quantile(usable, 1.0 - alpha / 2.0)))
+        return Interval(point, float(np.quantile(usable, alpha)), float("inf"), reps=reps, n_degenerate=n_degenerate)
+    return Interval(
+        point,
+        float(np.quantile(usable, alpha / 2.0)),
+        float(np.quantile(usable, 1.0 - alpha / 2.0)),
+        reps=reps,
+        n_degenerate=n_degenerate,
+    )
 
 
 def cluster_bootstrap_ci(
@@ -317,11 +420,13 @@ def cluster_bootstrap_ci(
     level: float,
     rng: np.random.Generator,
     one_sided: bool = False,
-) -> tuple[float, float, float]:
+    max_degenerate_frac: float = 0.0,
+) -> Interval:
     """Cluster bootstrap for trade-level statistics: whole clusters (entry-date cohorts) are resampled (12.5).
 
     Trades opened on one session share their entry snapshot, their candidate and their risk decision, so the cluster -
-    not the trade - is the independent unit.
+    not the trade - is the independent unit.  The statistic must be finite on the full frame, and a replicate on which
+    it is undefined is counted, not silently dropped (`max_degenerate_frac`, `Interval.n_degenerate`).
     """
     if cluster_col not in frame.columns:
         raise EvalError(f"frame has no cluster column {cluster_col!r}")
@@ -333,20 +438,30 @@ def cluster_bootstrap_ci(
         raise EvalError(f"the cluster bootstrap needs at least 2 clusters, got {len(labels)}")
     blocks: list[pd.DataFrame] = [frame[frame[cluster_col] == label] for label in labels]
     point = float(stat(frame))
+    if not math.isfinite(point):
+        raise EvalError(f"the cluster statistic is not finite on the full frame: {point!r}")
 
     draws: list[float] = []
+    n_degenerate = 0
     for _ in range(reps):
         picks = rng.integers(0, len(blocks), size=len(blocks))
         sample = pd.concat([blocks[int(i)] for i in picks.tolist()], ignore_index=True)
         value = float(stat(sample))
         if math.isfinite(value):
             draws.append(value)
-    if not draws:
-        raise EvalError("every cluster bootstrap replicate was non-finite")
+        else:
+            n_degenerate += 1
+    _check_degenerate(n_degenerate, reps, max_degenerate_frac, "cluster bootstrap")
     values = np.asarray(draws, dtype=np.float64)
     if one_sided:
-        return (point, float(np.quantile(values, alpha)), float("inf"))
-    return (point, float(np.quantile(values, alpha / 2.0)), float(np.quantile(values, 1.0 - alpha / 2.0)))
+        return Interval(point, float(np.quantile(values, alpha)), float("inf"), reps=reps, n_degenerate=n_degenerate)
+    return Interval(
+        point,
+        float(np.quantile(values, alpha / 2.0)),
+        float(np.quantile(values, 1.0 - alpha / 2.0)),
+        reps=reps,
+        n_degenerate=n_degenerate,
+    )
 
 
 def block_length_sample(indices: IntArray) -> FloatArray:

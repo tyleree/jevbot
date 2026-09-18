@@ -375,8 +375,12 @@ def _book_fill(
 # ======================================================================================================================
 
 
-def reconcile(ctx: CycleContext, view: MarketView | None, *, morning: bool = False) -> bool:
-    """R1-R6 at startup, at every cycle start, after each terminal order state, in the morning pass and post-close."""
+def reconcile(ctx: CycleContext, view: MarketView | None, *, morning: bool = False, boot: bool = False) -> bool:
+    """R1-R6 at startup, at every cycle start, after each terminal order state, in the morning pass and post-close.
+
+    `boot=True` adds the second half of R6: after downtime, a position that is already inside its hard-exit window needs
+    immediate emergency action, not the near-close cycle (9.6, INV-11).
+    """
     return run_reconcile(
         ledger=ctx.ledger,
         book=ctx.book,
@@ -390,6 +394,7 @@ def reconcile(ctx: CycleContext, view: MarketView | None, *, morning: bool = Fal
         session=view.key.session if view is not None else _book_session(ctx.book),
         as_of=view.as_of if view is not None else ctx.clock.now(),
         morning=morning,
+        boot=boot,
     )
 
 
@@ -407,6 +412,7 @@ def run_reconcile(
     session: date,
     as_of: datetime,
     morning: bool = False,
+    boot: bool = False,
 ) -> bool:
     ok = True
     order_actions: list[str] = []
@@ -473,7 +479,8 @@ def run_reconcile(
 
     # R6 EXPIRY -------------------------------------------------------------------------------------------------------
     expiring = sorted(_expiring_legs(book, broker, calendar, session))
-    if expiring:
+    inside_window = sorted(_inside_hard_exit_window(book, calendar, cfg, session)) if boot else []
+    if expiring or inside_window:
         ok = False
 
     book.apply(
@@ -494,6 +501,8 @@ def run_reconcile(
         kill.trip(KillTrigger.RECONCILE_MISMATCH, f"ledger/broker positions differ: {sorted(diff)}")
     if expiring:
         kill.trip(KillTrigger.EXPIRY_VIOLATION, f"last_session <= {session.isoformat()}: {','.join(expiring)}")
+    elif inside_window:
+        kill.trip(KillTrigger.EXPIRY_VIOLATION, f"inside the hard-exit window at boot: {','.join(inside_window)}")
     return ok
 
 
@@ -534,6 +543,15 @@ def _is_our_root(symbol: str, cfg: Config) -> bool:
         return occ.parse_occ(symbol).underlying in cfg.universe.underlyings
     except ValueError:
         return False
+
+
+def _inside_hard_exit_window(book: BookP, calendar: Calendar, cfg: Config, session: date) -> list[str]:
+    """Positions already inside their mandatory-exit window - the BOOT half of R6 (9.6, INV-11)."""
+    return [
+        position.position_id
+        for position in book.state().positions
+        if calendar.sessions_between(session, position.structure.last_session) <= cfg.dte.hard_exit_sessions
+    ]
 
 
 def _expiring_legs(book: BookP, broker: Broker, calendar: Calendar, session: date) -> list[str]:

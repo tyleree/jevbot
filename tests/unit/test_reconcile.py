@@ -231,7 +231,7 @@ class World:
             mode=RunMode.BACKTEST,
         )
 
-    def reconcile(self, view: FakeView | None = VIEW, *, morning: bool = False, session: date = SESSION) -> bool:
+    def reconcile(self, view: FakeView | None = VIEW, *, morning: bool = False, boot: bool = False, session: date = SESSION) -> bool:
         return reconcile.run_reconcile(
             ledger=self.ledger,
             book=self.book,
@@ -245,6 +245,7 @@ class World:
             session=session,
             as_of=CAL.open_close(session)[1],
             morning=morning,
+            boot=boot,
         )
 
     def kinds(self, kind: LedgerKind) -> list[dict[str, Any]]:
@@ -649,6 +650,34 @@ def test_r6_also_looks_at_the_ledgers_own_legs() -> None:
         w.broker.set_position(leg.contract.occ, 1 if leg.side is Side.BUY else -1)
     assert w.reconcile() is False
     assert any(trigger is KillTrigger.EXPIRY_VIOLATION for trigger, _ in w.kill.trips)
+
+
+def test_r6_at_boot_also_flags_a_position_already_inside_its_hard_exit_window() -> None:
+    """9.6 / INV-11: after downtime that needs immediate emergency action, not the near-close cycle."""
+    near = Structure(
+        kind=StructureKind.PUT_CREDIT,
+        underlying="SPY",
+        expiry=SPREAD.expiry,
+        last_session=CAL.next_session(SESSION, 3),  # sessions_to_expiry = 3 = dte.hard_exit_sessions
+        legs=SPREAD.legs,
+    )
+    w = world()
+    intent = open_intent(qty=1, structure=near)
+    force_position(w, intent, qty=1)
+    for leg in near.legs:
+        w.broker.set_position(leg.contract.occ, 1 if leg.side is Side.BUY else -1)
+    assert w.reconcile() is True and w.kill.trips == []  # an ordinary cycle leaves it to the manage step
+    assert w.reconcile(boot=True) is False
+    trigger, detail = w.kill.trips[-1]
+    assert trigger is KillTrigger.EXPIRY_VIOLATION and "hard-exit window" in detail
+
+    far = msgspec.structs.replace(near, last_session=CAL.next_session(SESSION, 4))
+    w2 = world()
+    far_intent = open_intent(qty=1, structure=far)
+    force_position(w2, far_intent, qty=1)
+    for leg in far.legs:
+        w2.broker.set_position(leg.contract.occ, 1 if leg.side is Side.BUY else -1)
+    assert w2.reconcile(boot=True) is True and w2.kill.trips == []
 
 
 def test_the_cycle_context_wrappers_reach_the_same_code() -> None:
