@@ -33,10 +33,10 @@ import pandas as pd
 
 from jevbot.config import Config
 from jevbot.data.series import NullNewsSource, PitTable, TableEventSource
-from jevbot.data.view import bars_table_name, daily_table_name, volidx_table_name
 from jevbot.data.surface import chain_nodes, const_maturity_iv, term_of
+from jevbot.data.view import bars_table_name, daily_table_name, volidx_table_name
 from jevbot.errors import ConfigError, DataUnavailable
-from jevbot.types import ChainSnapshot, SnapshotKey
+from jevbot.types import ChainSnapshot
 
 if TYPE_CHECKING:
     from jevbot.protocols import Calendar, ChainProvider, EventSource, NewsSource
@@ -75,8 +75,14 @@ def build_market_data(
     rate_bp: int = 0,
     news: "NewsSource | None" = None,
     events: "EventSource | None" = None,
+    iv_proxy: Mapping[str, pd.Series] | None = None,
 ) -> MarketData:
-    """Every table `DataView` needs besides chains, from ANY `ChainProvider` (see the module docstring)."""
+    """Every table `DataView` needs besides chains, from ANY `ChainProvider` (see the module docstring).
+
+    `iv_proxy` (V10): per underlying, a scaled vol-index series (index = session date, values = iv30 in bp) that
+    back-fills the `daily:<U>` IV history for sessions BEFORE the provider's first chain. Those rows carry
+    `source = "proxy"` so `features.iv_hist_proxy_pct` reports them; they are never mixed with a chain row.
+    """
     if not isinstance(provider, _DailyClosesSource):
         raise ConfigError(
             f"{type(provider).__name__} does not implement daily_closes(underlying) -> pd.Series; "
@@ -86,7 +92,8 @@ def build_market_data(
     for underlying in provider.underlyings():
         closes = provider.daily_closes(underlying)
         tables[bars_table_name(underlying)] = _bars_table(underlying, closes, calendar)
-        tables[daily_table_name(underlying)] = _daily_table(underlying, provider, closes, calendar)
+        proxy = (iv_proxy or {}).get(underlying)
+        tables[daily_table_name(underlying)] = _daily_table(underlying, provider, closes, calendar, proxy)
     for name, series in (vol_index or {}).items():
         tables[volidx_table_name(name)] = _volidx_table(name, series, calendar)
     tables["rates"] = _rates_table(_session_union(provider), rate_bp, calendar)
@@ -171,10 +178,51 @@ def _chain_daily_row(chain: ChainSnapshot, calendar: "Calendar") -> dict[str, An
     return row
 
 
-def _daily_table(underlying: str, provider: "ChainProvider", closes: pd.Series, calendar: "Calendar") -> PitTable:
+def _proxy_rows(
+    proxy: pd.Series, closes: pd.Series, rv_series: pd.Series, before: date, calendar: "Calendar"
+) -> list[dict[str, Any]]:
+    """V10 back-fill rows: one `eod` row per proxy session strictly before `before`, knowable at the next open."""
+    rows: list[dict[str, Any]] = []
+    for raw_session, iv_bp in proxy.items():
+        session = pd.Timestamp(raw_session).date()
+        if session >= before or pd.isna(iv_bp) or not calendar.is_session(session):
+            continue
+        close = closes.get(pd.Timestamp(session))
+        if close is None or pd.isna(close):
+            continue
+        knowable = pd.Timestamp(calendar.next_open_after(calendar.open_close(session)[1]))
+        rv = rv_series.get(pd.Timestamp(session))
+        rows.append(
+            {
+                "atm_term_json": None,
+                "iv30_bp": int(iv_bp),
+                "iv90_bp": None,
+                "skew25_bp": None,
+                "session": pd.Timestamp(session),
+                "slot": "eod",
+                "px_c": int(close),
+                "close_c": int(close),
+                "close_knowable_at": knowable,
+                "rv20_bp": None if rv is None or pd.isna(rv) else int(rv),
+                "spot_measure": "file_close",
+                "div_unmodelled": True,
+                "basis_suspect": False,
+                "source": "proxy",
+                "knowable_at": knowable,
+            }
+        )
+    return rows
+
+
+def _daily_table(
+    underlying: str, provider: "ChainProvider", closes: pd.Series, calendar: "Calendar", proxy: pd.Series | None = None
+) -> PitTable:
     rv_series = _rv20_bp(closes)
     rows: list[dict[str, Any]] = []
-    for key in provider.keys(underlying, _EARLIEST, _LATEST):
+    keys = provider.keys(underlying, _EARLIEST, _LATEST)
+    if proxy is not None and keys:
+        rows.extend(_proxy_rows(proxy, closes, rv_series, min(k.session for k in keys), calendar))
+    for key in keys:
         chain = provider.get_chain(underlying, key)
         if chain is None:
             continue
