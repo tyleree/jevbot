@@ -17,8 +17,9 @@ fill claims, content-addressed states and meta (DESIGN.md 2.7, 2.11, 3.4, 13.4; 
 * **The other tables (13.4).** `fill_ids` is the UNIQUE dedupe of the ONE fill path (`claim_fill`); `states` /
   `state_index` hold every built state of the run, content-addressed and indexed by (session, underlying, request_kind,
   variant) - re-putting the SAME hash is an idempotent no-op, a DIFFERENT hash for an indexed key is a determinism bug
-  (`InvariantError`); `meta` keys are write-once. Outcomes and calibration are VIEWS over the ledger (SQLite JSON1); a
-  forecast with a NULL `p_ppm` is a MISSING forecast and is never filtered out.
+  (`InvariantError`); `meta` keys are write-once apart from the `last_verified_seq` high-water mark below. Outcomes and
+  calibration are VIEWS over the ledger (SQLite JSON1); a forecast with a NULL `p_ppm` is a MISSING forecast and is never
+  filtered out.
 
 `verify(from_seq)` is the incremental check every cycle runs (9.6 R5: full at startup, incremental afterwards). The highest
 verified seq is kept in the `last_verified_seq` meta row (13.4), which this store maintains inside `verify()` itself -
@@ -318,11 +319,11 @@ class SqliteLedger:
     def _begin(self) -> None:
         """Open the write transaction if none is open (`per_append` closes it again at once; `per_session` at `commit()`)."""
         if not self._conn.in_transaction:
-            self._conn.execute("BEGIN IMMEDIATE")
+            self._execute("BEGIN IMMEDIATE")
 
     def _autocommit(self) -> None:
         if self.commit_mode == "per_append":
-            self._conn.commit()
+            self._commit_conn()
             self._uncommitted = 0
 
     @property
@@ -342,15 +343,21 @@ class SqliteLedger:
         self.close()
 
     def close(self) -> None:
-        """Roll back an uncommitted session (the store holds whole sessions only) and close the connection."""
+        """Roll back an uncommitted session (the store holds whole sessions only) and close the connection.
+
+        A rollback that itself fails never leaks the connection: the file is closed either way."""
         with self._lock:
             if self._closed:
                 return
-            if self._conn.in_transaction:
-                self._conn.rollback()
-            self._uncommitted = 0
-            self._conn.close()
-            self._closed = True
+            try:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+            except sqlite3.Error:  # nothing was committed, so there is nothing to lose by closing anyway
+                pass
+            finally:
+                self._uncommitted = 0
+                self._conn.close()
+                self._closed = True
 
     # --- Ledger protocol ----------------------------------------------------------------------------------------------
 
@@ -376,12 +383,12 @@ class SqliteLedger:
             prev = self._hash
             digest = ledger_entry_hash(prev, seq, k.value, session_text, as_of_text, loaded)
             self._begin()
-            self._conn.execute(
+            self._execute(
                 "INSERT INTO ledger (seq, kind, session, as_of, payload, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (seq, k.value, session_text, as_of_text, payload_json, prev, digest),
             )
             if columns is not None:
-                self._conn.execute(
+                self._execute(
                     "INSERT INTO sidecar (seq, wall_created_at, provenance, diagnostics) VALUES (?, ?, ?, ?)", (seq, *columns)
                 )
             self._seq, self._hash = seq, digest
@@ -401,7 +408,7 @@ class SqliteLedger:
         """Make everything written since the last commit durable (backtest: once per session; paper: after every append)."""
         with self._lock:
             self._require_open()
-            self._conn.commit()
+            self._commit_conn()
             self._uncommitted = 0
             self.commits += 1
 
@@ -413,7 +420,7 @@ class SqliteLedger:
             if self.commit_mode == "per_append":
                 return
             if self._conn.in_transaction:
-                self._conn.rollback()
+                self._rollback_conn()
             self._uncommitted = 0
             self._seq, self._hash = self._read_head()
 
@@ -443,7 +450,7 @@ class SqliteLedger:
             params.append(_PAGE)
             with self._lock:
                 self._require_open()
-                rows = self._conn.execute(sql, params).fetchall()
+                rows = self._execute(sql, params).fetchall()
             if not rows:
                 return
             for row in rows:
@@ -455,17 +462,19 @@ class SqliteLedger:
         through `canon.ledger_entry_hash` - and raise `LedgerCorrupt` on the first mismatch (INV-19).
 
         A successful walk that starts no later than one past the highest verified seq advances the `last_verified_seq`
-        meta row, which is what the incremental per-cycle check reads.
+        meta row (13.4), which is what the incremental per-cycle check of 9.6 R5 reads back through
+        `get_meta(LAST_VERIFIED_SEQ)`. Verification itself is a READ (3.4): that marker is written best effort and a store
+        that cannot be written right now still verifies.
         """
         with self._lock:
             self._require_open()
-            count = int(self._conn.execute("SELECT COUNT(*) FROM ledger").fetchone()[0])
+            count = int(self._execute("SELECT COUNT(*) FROM ledger").fetchone()[0])
         if isinstance(from_seq, bool) or not isinstance(from_seq, int) or not 1 <= from_seq <= count + 1:
             raise ValueError(f"from_seq must be in 1..{count + 1}, got {from_seq!r}")
         prev = GENESIS_HASH
         if from_seq > 1:
             with self._lock:
-                row = self._conn.execute("SELECT hash FROM ledger WHERE seq = ?", (from_seq - 1,)).fetchone()
+                row = self._execute("SELECT hash FROM ledger WHERE seq = ?", (from_seq - 1,)).fetchone()
             if row is None:
                 raise LedgerCorrupt(f"ledger seq gap at position {from_seq - 1}: no such entry")
             prev = str(row[0])
@@ -473,7 +482,7 @@ class SqliteLedger:
         while True:
             with self._lock:
                 self._require_open()
-                rows = self._conn.execute(f"{_ROW_SQL} WHERE seq >= ? ORDER BY seq LIMIT ?", (expected, _PAGE)).fetchall()
+                rows = self._execute(f"{_ROW_SQL} WHERE seq >= ? ORDER BY seq LIMIT ?", (expected, _PAGE)).fetchall()
             if not rows:
                 break
             for seq, kind, session, as_of, payload, prev_hash, stored in rows:
@@ -502,18 +511,32 @@ class SqliteLedger:
         return stored
 
     def _advance_verified(self, from_seq: int, count: int) -> None:
-        if from_seq <= self.last_verified_seq + 1 and count > self.last_verified_seq:
+        """Move the high-water mark to `count` when this walk started no later than one past it - BEST EFFORT.
+
+        3.4 specifies `verify()` as "recompute the chain; raises LedgerCorrupt", i.e. a read: a store that is held by
+        another writer or opened read-only must not turn a SUCCESSFUL verification into a failure because its bookkeeping
+        row could not be written. The marker then stays where it was and the next cycle re-verifies from there; a marker
+        that holds nonsense is still corruption when it is READ (`last_verified_seq`).
+        """
+        try:
             with self._lock:
+                verified = self.last_verified_seq
+                if from_seq > verified + 1 or count <= verified:
+                    return
                 self._begin()
-                self._conn.execute(
+                self._execute(
                     "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (LAST_VERIFIED_SEQ, str(count)),
                 )
                 self._autocommit()
+        except LedgerCorrupt:
+            return
 
     @property
     def last_verified_seq(self) -> int:
-        """The highest seq a `verify()` of this store has checked (0 when it has never been verified)."""
+        """The highest seq a `verify()` of this store has checked (0 when it has never been verified).
+
+        A convenience over the portable read every `Ledger` implementation shares: `get_meta(LAST_VERIFIED_SEQ)`."""
         stored = self.get_meta(LAST_VERIFIED_SEQ)
         try:
             return 0 if stored is None else int(stored)
@@ -528,7 +551,7 @@ class SqliteLedger:
             self._require_open()
             self._begin()
             try:
-                cursor = self._conn.execute("INSERT OR IGNORE INTO fill_ids (fill_id, seq) VALUES (?, ?)", (fill_id, self._seq))
+                cursor = self._execute("INSERT OR IGNORE INTO fill_ids (fill_id, seq) VALUES (?, ?)", (fill_id, self._seq))
                 return cursor.rowcount == 1
             finally:
                 self._autocommit()
@@ -549,7 +572,7 @@ class SqliteLedger:
         key = (render_session(session), underlying, request_kind, variant)
         with self._lock:
             self._require_open()
-            row = self._conn.execute(
+            row = self._execute(
                 "SELECT state_hash FROM state_index WHERE session = ? AND underlying = ? AND request_kind = ? AND variant = ?", key
             ).fetchone()
             if row is not None and str(row[0]) != state_hash:
@@ -558,9 +581,9 @@ class SqliteLedger:
                     "(a rebuilt state must be byte-identical, 10.1)"
                 )
             self._begin()
-            self._conn.execute("INSERT OR IGNORE INTO states (state_hash, state_json) VALUES (?, ?)", (state_hash, state_json))
+            self._execute("INSERT OR IGNORE INTO states (state_hash, state_json) VALUES (?, ?)", (state_hash, state_json))
             if row is None:
-                self._conn.execute(
+                self._execute(
                     "INSERT INTO state_index (session, underlying, request_kind, variant, state_hash) VALUES (?, ?, ?, ?, ?)",
                     (*key, state_hash),
                 )
@@ -571,7 +594,7 @@ class SqliteLedger:
         underlying): THE source of baseline 6's recorded states (12.4) and of the probe suites' `run:RUN_ID` source."""
         with self._lock:
             self._require_open()
-            rows = self._conn.execute(
+            rows = self._execute(
                 "SELECT i.session, i.underlying, s.state_json FROM state_index i JOIN states s ON s.state_hash = i.state_hash "
                 "WHERE i.request_kind = ? AND i.variant = ? ORDER BY i.session, i.underlying",
                 (request_kind, variant),
@@ -582,26 +605,43 @@ class SqliteLedger:
     def get_meta(self, key: str) -> str | None:
         with self._lock:
             self._require_open()
-            row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            row = self._execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return None if row is None else str(row[0])
 
     def set_meta(self, key: str, value: str) -> None:
-        """Write-once: the same value again is a no-op, a different value is an `InvariantError`. `last_verified_seq` is
-        this module's own bookkeeping and is refused here - `verify()` maintains it."""
+        """Write-once: the same value again is a no-op, a different value is an `InvariantError`.
+
+        `last_verified_seq` (13.4) is the ONE exception. It is a high-water mark rather than run data, so it may be
+        rewritten (last write wins). `verify()` maintains it in this store; a `Ledger` implementation that does not can
+        have its consumer maintain it through this method, which is what makes 9.6 R5 ("full at startup, incremental since
+        the last verified seq each cycle") portable across every implementation of the 3.4 Protocol - both sides read it
+        back with `get_meta(LAST_VERIFIED_SEQ)`. The marker must be a whole number of entries and may not claim more
+        entries than the chain holds: a bogus mark would silently skip verification.
+        """
         if not isinstance(key, str) or not key or not isinstance(value, str):
             raise ValueError("meta key must be a non-empty str and the value a str")
-        if key == LAST_VERIFIED_SEQ:
-            raise InvariantError(f"meta key {LAST_VERIFIED_SEQ!r} is maintained by verify(), not by set_meta()")
         with self._lock:
             self._require_open()
-            existing = self.get_meta(key)
-            if existing is not None:
-                if existing != value:
-                    raise InvariantError(f"meta key {key!r} is write-once and already holds a different value")
-                return
+            if key == LAST_VERIFIED_SEQ:
+                self._check_verified_marker(value)
+            else:
+                existing = self.get_meta(key)
+                if existing is not None:
+                    if existing != value:
+                        raise InvariantError(f"meta key {key!r} is write-once and already holds a different value")
+                    return
             self._begin()
-            self._conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, value))
+            self._execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value)
+            )
             self._autocommit()
+
+    def _check_verified_marker(self, value: str) -> None:
+        """`last_verified_seq` is a seq the chain actually reaches, written in plain ASCII digits (13.4)."""
+        if not value.isascii() or not value.isdigit():
+            raise InvariantError(f"meta {LAST_VERIFIED_SEQ!r} must be a whole number of entries, got {value!r}")
+        if int(value) > self._seq:
+            raise InvariantError(f"meta {LAST_VERIFIED_SEQ!r} cannot claim seq {value}: the chain holds {self._seq} entries")
 
     # --- materialisation ------------------------------------------------------------------------------------------------
 
@@ -632,7 +672,7 @@ class SqliteLedger:
         """The unhashed sidecar of entry `seq` as `{"wall_created_at", "provenance", "diagnostics"}` (13.4), or None."""
         with self._lock:
             self._require_open()
-            row = self._conn.execute("SELECT wall_created_at, provenance, diagnostics FROM sidecar WHERE seq = ?", (seq,)).fetchone()
+            row = self._execute("SELECT wall_created_at, provenance, diagnostics FROM sidecar WHERE seq = ?", (seq,)).fetchone()
         if row is None:
             return None
         wall, provenance, diagnostics = row
@@ -646,7 +686,7 @@ class SqliteLedger:
         """Every claimed fill id, ascending (the dedupe table of 9.6)."""
         with self._lock:
             self._require_open()
-            rows = self._conn.execute("SELECT fill_id FROM fill_ids ORDER BY fill_id").fetchall()
+            rows = self._execute("SELECT fill_id FROM fill_ids ORDER BY fill_id").fetchall()
         return tuple(str(row[0]) for row in rows)
 
     def view(self, name: str) -> tuple[tuple[str, ...], list[tuple[Any, ...]]]:
@@ -656,7 +696,7 @@ class SqliteLedger:
             raise ValueError(f"unknown view {name!r}; the run store has {sorted(VIEW_COLUMNS)}")
         with self._lock:
             self._require_open()
-            cursor = self._conn.execute(f"SELECT * FROM {name}")  # name is one of the frozen keys above
+            cursor = self._execute(f"SELECT * FROM {name}")  # name is one of the frozen keys above
             columns = tuple(str(column[0]) for column in cursor.description)
             rows = cursor.fetchall()
         return (columns, [tuple(row) for row in rows])
