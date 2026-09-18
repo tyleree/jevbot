@@ -29,8 +29,7 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
@@ -41,7 +40,7 @@ from jevbot.cal import year_fraction
 from jevbot.config import Config
 from jevbot.data import surface
 from jevbot.errors import ConfigError, DataUnavailable
-from jevbot.types import CHAIN_COLUMNS, Cents, ChainSnapshot, Fidelity, Right, SnapshotKey, Slot
+from jevbot.types import CHAIN_COLUMNS, ChainSnapshot, Fidelity, Right, Slot, SnapshotKey
 
 if TYPE_CHECKING:
     from jevbot.protocols import Calendar

@@ -26,7 +26,7 @@ from jevbot.config import Config
 from jevbot.errors import DataError, DeciderError
 from jevbot.protocols import Decider, MarketView
 from jevbot.risk import DefaultRiskEngine
-from jevbot.rules import DecisionRules
+from jevbot.rules import DecisionRules, no_trade
 from jevbot.state import StateBuilder
 from jevbot.types import (
     MANDATORY_EXITS,
@@ -40,10 +40,11 @@ from jevbot.types import (
     DecisionResult,
     EntryContext,
     EntryDecision,
+    EntryFacts,
     ExitReason,
     LedgerKind,
-    Leg,
     ManageDecision,
+    ManageFacts,
     NoulAns,
     OrderIntent,
     OrderLeg,
@@ -71,7 +72,7 @@ def namespace_for(cfg: Config, decider: Decider) -> str:
 
 
 def _headline_band(cfg: Config) -> Band:
-    from jevbot.fills import headline_band as _hb
+    from jevbot.config import headline_band as _hb
 
     return _hb(cfg)
 
@@ -106,7 +107,16 @@ def _decide(decider: Decider, req: DecisionRequest) -> DecisionResult | DeciderE
 
 
 def _build_request(
-    *, kind: RequestKind, decision_kind: str, question_set_id: str, namespace: str, subject: str, underlying: str, session: date, key: SnapshotKey, built: BuiltState
+    *,
+    kind: RequestKind,
+    decision_kind: str,
+    question_set_id: str,
+    namespace: str,
+    subject: str,
+    underlying: str,
+    session: date,
+    key: SnapshotKey,
+    built: BuiltState,
 ) -> DecisionRequest:
     questions = questions_module.question_set(question_set_id)
     return DecisionRequest(
@@ -170,7 +180,15 @@ def _request_record(req: DecisionRequest, result: DecisionResult | DeciderError 
 def _no_intent_verdict(decision_id: str, codes: tuple[str, ...]) -> RiskVerdict:
     verdict_id = canon.sha256_hex(canon.dumps_sorted([decision_id, list(codes)]))[:24]
     return RiskVerdict(
-        verdict_id=verdict_id, decision_id=decision_id, intent_id=None, approved=False, qty_approved=0, checks=(), reject_codes=codes, max_loss=0, bp_required=0
+        verdict_id=verdict_id,
+        decision_id=decision_id,
+        intent_id=None,
+        approved=False,
+        qty_approved=0,
+        checks=(),
+        reject_codes=codes,
+        max_loss=0,
+        bp_required=0,
     )
 
 
@@ -217,6 +235,7 @@ def decide_manages(
     orders: list[tuple[OrderIntent, ApprovedOrder]] = []
     for pos in positions:
         built = state_builder.manage(view, pos)
+        assert isinstance(built.facts, ManageFacts)
         decision_id = ids.decision_id(namespace, session, pos.structure.underlying, "manage", pos.position_id)
         hard = risk.hard_exit(pos, view)
         core: DecisionResult | DeciderError | None = None
@@ -258,8 +277,8 @@ def decide_manages(
             chain = view.chain(pos.structure.underlying)
         except DataError:
             continue  # nothing to price a close against this session; the latch/watch state is already ledgered
-        quotes = [chain.quote(leg.contract) for leg in pos.structure.legs]
-        if any(q is None for q in quotes):
+        quotes = [quote for leg in pos.structure.legs if (quote := chain.quote(leg.contract)) is not None]
+        if len(quotes) != len(pos.structure.legs):
             continue
         mandatory = hard is not None and ExitReason(hard) in MANDATORY_EXITS
         from jevbot.fills import BandFillModel  # local: avoids a module-level cycle with candidates.py's own import
@@ -285,7 +304,9 @@ def decide_manages(
             key=view.key,
             structure=pos.structure,
         )
-        verdict, order = risk.approve(intent, pf_state(), view, now=as_of, attempt=0, limit=natural, cand=None, approved_so_far=(), clock=None, market=False)
+        verdict, order = risk.approve(
+            intent, pf_state(), view, now=as_of, attempt=0, limit=natural, cand=None, approved_so_far=(), clock=None, market=False
+        )
         writes.append(_verdict_write(verdict, None))
         if order is not None:
             writes.append((LedgerKind.ORDER_INTENT, msgspec.to_builtins(intent)))
@@ -326,7 +347,7 @@ def decide_entries(
         decision_id = ids.decision_id(namespace, session, underlying, "entry", ids.ENTRY_SUBJECT)
         built = state_builder.entry(view, underlying)
         if built is None:
-            ed = rules.no_trade(underlying, decision_id, "dq:insufficient")
+            ed = no_trade(underlying, decision_id, "dq:insufficient")
             writes.append(
                 (
                     LedgerKind.DECISION,
@@ -344,6 +365,7 @@ def decide_entries(
             )
             continue
         built_by_u[underlying] = built
+        assert isinstance(built.facts, EntryFacts)
         req = _build_request(
             kind=RequestKind.ENTRY,
             decision_kind="entry",
@@ -357,7 +379,7 @@ def decide_entries(
         )
         result = _decide(decider, req)
         if isinstance(result, DeciderError):
-            ed = rules.no_trade(underlying, decision_id, "decider_failed_cycle")
+            ed = no_trade(underlying, decision_id, f"decider_failed_cycle:{type(result).__name__}")
         else:
             ed = rules.decide_entry(underlying, decision_id, result, None, built.facts)
         writes.append(
@@ -382,6 +404,7 @@ def decide_entries(
     approved: list[ApprovedOrder] = []
     orders: list[tuple[OrderIntent, ApprovedOrder]] = []
     for ed in ranked:
+        assert ed.kind is not None
         cand = candidates.build(ed.kind, view, ed.underlying, budget_floor=risk.budget_floor(pf_state()))
         if isinstance(cand, CandidateReject) or cand.rejects:
             codes = tuple(f"candidate:{c}" for c in cand.rejects)
@@ -392,6 +415,7 @@ def decide_entries(
             writes.append(_verdict_write(_no_intent_verdict(ed.decision_id, ("risk:size_zero",)), cand))
             continue
         facts = built_by_u[ed.underlying].facts
+        assert isinstance(facts, EntryFacts)
         entry_ctx = EntryContext(
             entry_thesis=facts.thesis,
             entry_codes={"trend": facts.trend_code, "iv_vs_realized": facts.iv_rv_code, "iv_rank": facts.iv_rank_code},
@@ -422,7 +446,18 @@ def decide_entries(
             structure=cand.structure,
             entry_ctx=entry_ctx,
         )
-        verdict, order = risk.approve(intent, pf_state(), view, now=as_of, attempt=0, limit=natural, cand=cand, approved_so_far=tuple(approved), clock=None, market=False)
+        verdict, order = risk.approve(
+            intent,
+            pf_state(),
+            view,
+            now=as_of,
+            attempt=0,
+            limit=natural,
+            cand=cand,
+            approved_so_far=tuple(approved),
+            clock=None,
+            market=False,
+        )
         writes.append(_verdict_write(verdict, cand))
         if order is not None:
             approved.append(order)

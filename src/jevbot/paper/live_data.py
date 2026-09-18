@@ -72,6 +72,8 @@ _CHAIN_DTYPES: Final[dict[str, str]] = {
 
 def current_session(calendar: Calendar, now: datetime) -> tuple[date, Slot]:
     """The session a snapshot taken at `now` belongs to: the trading session (`dec`) or the last closed one (`eod`)."""
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
     s = calendar.prev_or_same_session(now.astimezone(_NY).date())
     opened, closed = calendar.open_close(s)
     if now < opened:
@@ -189,10 +191,16 @@ class AlpacaLiveProvider:
             spot = _spot(quotes.get(u), trades.get(u))
             chain = _chain(clients, cfg, calendar, u, key, spot, rate, now)
             chains[u] = chain
-            closes[u] = _daily_closes(clients, u, session, slot, now)
+            closes[u] = _daily_closes(clients, u, session, slot, now, calendar)
             proxy_sym = cfg.universe.iv_proxy[u]
             if proxy_sym not in vol_index:
-                vol_index[proxy_sym] = fetch_cboe_index(proxy_sym)
+                history = fetch_cboe_index(proxy_sym)
+                # Cboe archives extend beyond our calendar and include exchange holidays.
+                # Keep only completed sessions in the requested history window.
+                history = history[
+                    (history.index >= pd.Timestamp((now - timedelta(days=_HISTORY_DAYS)).date())) & (history.index < pd.Timestamp(session))
+                ]
+                vol_index[proxy_sym] = history[[calendar.is_session(d.date()) for d in history.index]]
             iv_proxy[u] = _scaled_proxy(vol_index[proxy_sym], chain, calendar, session)
         return cls(key=key, chains=chains, closes=closes, vol_index=vol_index, iv_proxy=iv_proxy, rate=rate)
 
@@ -243,9 +251,9 @@ def _spot(quote: Any, trade: Any) -> Cents:
     """Decision-time reference price: the underlying's quote mid when two-sided and sane, else the last trade."""
     if quote is not None and quote.bid_price and quote.ask_price and 0 < quote.bid_price <= quote.ask_price:
         mid = (quote.bid_price + quote.ask_price) / 2.0
-        if trade is None or not trade.price or abs(mid / trade.price - 1.0) < 0.01:
+        if math.isfinite(mid) and (trade is None or not trade.price or abs(mid / trade.price - 1.0) < 0.01):
             return round(float(mid) * 100)
-    if trade is not None and trade.price:
+    if trade is not None and trade.price and math.isfinite(trade.price) and trade.price > 0:
         return round(float(trade.price) * 100)
     raise DataUnavailable("alpaca: no usable underlying quote or trade")
 
@@ -261,7 +269,7 @@ def _chain(
         )
     )
     raw = _raw_chain(dict(snaps))
-    ts = now.astimezone(UTC)
+    ts = datetime.now(UTC)  # receipt time, never the timestamp from before the network request
     forwards = surface.parity_forwards(raw, rate, ts, calendar)
     enriched = surface.enrich(raw, forwards, rate, ts, calendar, session=key.session)
     keep = (enriched["dte"] >= 1) & (enriched["dte"] <= cfg.data.max_dte)
@@ -269,6 +277,8 @@ def _chain(
     moneyness = np.log((enriched["strike_milli"].astype("float64") / 10.0) / fwd.where(fwd > 0))
     keep &= moneyness.abs() <= cfg.data.moneyness_window
     enriched = enriched[keep].astype(_CHAIN_DTYPES)[CHAIN_COLUMNS]
+    if enriched.empty:
+        raise DataUnavailable(f"alpaca: no usable contracts after filtering {u}")
     enriched = enriched.sort_values(["expiry", "right", "strike_milli"], kind="mergesort").reset_index(drop=True)
     digest = hashlib.sha256(enriched.to_csv(index=False, lineterminator="\n").encode("utf-8")).hexdigest()
     return ChainSnapshot(
@@ -287,7 +297,7 @@ def _chain(
     )
 
 
-def _daily_closes(clients: AlpacaClients, u: str, session: date, slot: Slot, now: datetime) -> pd.Series:
+def _daily_closes(clients: AlpacaClients, u: str, session: date, slot: Slot, now: datetime, calendar: Calendar) -> pd.Series:
     """Split-adjusted daily closes in integer cents, indexed by session date; the live session is excluded."""
     bars = clients.stocks.get_stock_bars(
         StockBarsRequest(
@@ -304,7 +314,10 @@ def _daily_closes(clients: AlpacaClients, u: str, session: date, slot: Slot, now
     out: dict[pd.Timestamp, int] = {}
     for bar in bars.data.get(u, []):
         d = bar.timestamp.astimezone(_NY).date()
-        if slot is Slot.DEC and d >= session:  # a trading session's bar is partial
+        if d > session or not calendar.is_session(d):
+            continue
+        if (slot is Slot.DEC and d == session) or now - _SIP_DELAY < calendar.open_close(d)[1]:
+            # Even just after the close the delayed SIP bar is still partial.
             continue
         out[pd.Timestamp(d)] = round(bar.close * 100)
     if len(out) < 60:

@@ -25,7 +25,7 @@ engine never builds `entry_text` / `manage_text` requests, so a real news archiv
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 import numpy as np
@@ -124,8 +124,9 @@ def _bars_table(underlying: str, closes: pd.Series, calendar: "Calendar") -> Pit
     open_knowable: list[pd.Timestamp] = []
     hlcv_knowable: list[pd.Timestamp] = []
     for session in sessions:
-        opened, _closed = calendar.open_close(session)
-        open_knowable.append(pd.Timestamp(opened + timedelta(seconds=60)))
+        # With close-only data, the synthetic "open" is also the final close.
+        # It must not become visible before that close was knowable.
+        open_knowable.append(pd.Timestamp(calendar.next_open_after(calendar.open_close(session)[1])))
         hlcv_knowable.append(pd.Timestamp(calendar.next_open_after(calendar.open_close(session)[1])))
     values = closes.to_numpy(dtype="float64")
     frame = pd.DataFrame(
